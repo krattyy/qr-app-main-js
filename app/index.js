@@ -1,9 +1,11 @@
-import * as ImagePicker from "expo-image-picker"; // Galeri için
+import * as ImagePicker from "expo-image-picker";
 import * as MediaLibrary from "expo-media-library";
 import * as Sharing from "expo-sharing";
 import { useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
+  Dimensions,
   Keyboard,
   Modal,
   ScrollView,
@@ -16,169 +18,219 @@ import {
 import QRCode from "react-native-qrcode-svg";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { captureRef } from "react-native-view-shot";
-import ColorPicker, {
-  HueSlider,
-  Panel1,
-  Preview,
-} from "reanimated-color-picker";
+import ColorPicker from "react-native-wheel-color-picker";
+
+const { width } = Dimensions.get("window");
 
 export default function App() {
   const [metin, setMetin] = useState("https://google.com");
   const [tempMetin, setTempMetin] = useState("");
   const [qrRengi, setQrRengi] = useState("#000000");
-  const [secilenLogo, setSecilenLogo] = useState(null); // Logo state'i
+  const [hexInput, setHexInput] = useState("#000000");
+  const [secilenLogo, setSecilenLogo] = useState(null);
   const [modalGorunur, setModalGorunur] = useState(false);
+  const [yukleniyor, setYukleniyor] = useState(false);
 
   const qrReferansi = useRef();
 
-  // Galeriden Logo Seçme Fonksiyonu
+  const hexGirisiniYonet = (text) => {
+    setHexInput(text);
+    const hexRegex = /^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$/;
+    if (hexRegex.test(text)) {
+      setQrRengi(text);
+    }
+  };
+
   const logoSec = async () => {
     let sonuc = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      mediaTypes: ["images"],
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.5,
     });
-
     if (!sonuc.canceled) {
       setSecilenLogo(sonuc.assets[0].uri);
     }
   };
 
-  const qrOlustur = () => {
-    if (tempMetin.trim() !== "") {
-      setMetin(tempMetin);
-      Keyboard.dismiss();
-    }
-  };
-
   const galeriyeKaydet = async () => {
+    setYukleniyor(true);
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync(true);
-      if (status !== "granted") return Alert.alert("Hata", "İzin gerekiyor.");
-      const resimYolu = await captureRef(qrReferansi, {
-        format: "png",
-        quality: 1,
-      });
-      await MediaLibrary.saveToLibraryAsync(resimYolu);
-      Alert.alert("Başarılı", "QR Kod galeriye kaydedildi!");
-    } catch (hata) {
-      Alert.alert("Hata", "Kaydetme başarısız.");
-    }
-  };
+      if (status !== "granted") throw new Error("İzin yok");
 
-  const paylas = async () => {
-    const resimYolu = await captureRef(qrReferansi, {
-      format: "png",
-      quality: 1,
-    });
-    await Sharing.shareAsync(resimYolu);
+      setTimeout(async () => {
+        const resimYolu = await captureRef(qrReferansi, {
+          format: "png",
+          quality: 1,
+        });
+        await MediaLibrary.saveToLibraryAsync(resimYolu);
+        setYukleniyor(false);
+        Alert.alert("Başarılı ✨", "QR Kod galeriye eklendi.");
+      }, 500);
+    } catch (e) {
+      setYukleniyor(false);
+      Alert.alert("Hata", "Kaydedilemedi.");
+    }
   };
 
   return (
     <SafeAreaProvider>
-      <SafeAreaView style={styles.disKutu}>
+      <SafeAreaView style={styles.container}>
         <ScrollView
-          contentContainerStyle={{ alignItems: "center", paddingBottom: 40 }}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
         >
-          <Text style={styles.baslik}>ArticQR Studio</Text>
-
-          {/* QR ALANI */}
-          <View ref={qrReferansi} style={styles.qrKutu}>
-            <QRCode
-              value={metin}
-              size={220}
-              color={qrRengi}
-              backgroundColor="white"
-              logo={secilenLogo ? { uri: secilenLogo } : null} // Logo varsa bas
-              logoSize={60}
-              logoBackgroundColor="white"
-              logoBorderRadius={10}
-            />
+          <View style={styles.headerContainer}>
+            <Text style={styles.brandName}>ArticQR</Text>
+            <Text style={styles.tagline}>Geleceğin Tasarım Stüdyosu</Text>
           </View>
 
-          {/* TASARIM BUTONLARI */}
-          <View style={styles.tasarimSatiri}>
+          {/* QR PREVIEW CARD */}
+          <View style={styles.previewCard}>
+            <View
+              ref={qrReferansi}
+              collapsable={false}
+              style={styles.qrShadowBox}
+            >
+              <QRCode
+                value={metin}
+                size={width * 0.55}
+                color={qrRengi}
+                backgroundColor="white"
+                logo={secilenLogo ? { uri: secilenLogo } : null}
+                logoSize={60}
+                logoBackgroundColor="white"
+                logoBorderRadius={12}
+                quietZone={10}
+              />
+            </View>
+          </View>
+
+          {/* MODERN TOOLBAR */}
+          <View style={styles.modernToolbar}>
             <TouchableOpacity
-              style={[styles.ayarButonu, { borderColor: qrRengi }]}
+              style={styles.mainAction}
               onPress={() => setModalGorunur(true)}
             >
-              <Text>🎨 Renk</Text>
+              <Text style={styles.actionEmoji}>🎨</Text>
+              <Text style={styles.actionText}>Renk & Stil</Text>
             </TouchableOpacity>
 
-            <TouchableOpacity style={styles.ayarButonu} onPress={logoSec}>
-              <Text>🖼️ Logo Ekle</Text>
+            <TouchableOpacity style={styles.mainAction} onPress={logoSec}>
+              <Text style={styles.actionEmoji}>✨</Text>
+              <Text style={styles.actionText}>Logo Ekle</Text>
             </TouchableOpacity>
 
             {secilenLogo && (
               <TouchableOpacity
-                style={[styles.ayarButonu, { borderColor: "red" }]}
+                style={styles.deleteLogo}
                 onPress={() => setSecilenLogo(null)}
               >
-                <Text>❌ Sil</Text>
+                <Text style={{ color: "#FF3B30", fontWeight: "bold" }}>
+                  Logoyu Kaldır
+                </Text>
               </TouchableOpacity>
             )}
           </View>
 
-          {/* RENK SEÇİCİ MODAL */}
+          {/* INPUT SECTION */}
+          <View style={styles.inputArea}>
+            <View style={styles.inputWrapper}>
+              <TextInput
+                style={styles.textInput}
+                placeholder="İçeriği buraya yazın..."
+                onChangeText={setTempMetin}
+                value={tempMetin}
+                placeholderTextColor="#A0A0A0"
+              />
+            </View>
+
+            <TouchableOpacity
+              style={styles.generateButton}
+              onPress={() => {
+                setMetin(tempMetin || metin);
+                Keyboard.dismiss();
+              }}
+            >
+              <Text style={styles.generateButtonText}>QR OLUŞTUR</Text>
+            </TouchableOpacity>
+
+            <View style={styles.rowButtons}>
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={galeriyeKaydet}
+              >
+                {yukleniyor ? (
+                  <ActivityIndicator color="#000" />
+                ) : (
+                  <Text style={styles.secondaryButtonText}>💾 Galeriye At</Text>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.secondaryButton}
+                onPress={async () => {
+                  const uri = await captureRef(qrReferansi, { format: "png" });
+                  Sharing.shareAsync(uri);
+                }}
+              >
+                <Text style={styles.secondaryButtonText}>📤 Hemen Paylaş</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          {/* PROFESSIONAL COLOR MODAL */}
           <Modal
             visible={modalGorunur}
             animationType="slide"
             transparent={true}
           >
-            <View style={styles.modalMerkez}>
-              <View style={styles.modalIcerik}>
-                <ColorPicker
-                  value={qrRengi}
-                  onComplete={(res) => {
-                    // Buraya bir try-catch ekleyerek hatanın uygulamayı kapatmasını engelleyelim
-                    try {
-                      if (res && res.hex) {
-                        setQrRengi(res.hex);
-                      }
-                    } catch (e) {
-                      console.log("Renk seçme hatası:", e);
-                    }
-                  }}
-                >
-                  <Panel1 style={styles.panel} />
-                  <HueSlider style={styles.slider} />
-                  <Preview style={styles.onizlemeKutusu} />
-                </ColorPicker>
+            <View style={styles.blurOverlay}>
+              <View style={styles.bottomSheet}>
+                <View style={styles.dragHandle} />
+                <Text style={styles.sheetTitle}>Tasarım Özellikleri</Text>
+
+                <View style={styles.hexRow}>
+                  <Text style={styles.hexSymbol}>#</Text>
+                  <TextInput
+                    style={styles.hexField}
+                    placeholder="000000"
+                    value={hexInput.replace("#", "")}
+                    onChangeText={hexGirisiniYonet}
+                    maxLength={6}
+                    autoCapitalize="characters"
+                  />
+                  <View
+                    style={[styles.colorBubble, { backgroundColor: qrRengi }]}
+                  />
+                </View>
+
+                <View style={styles.pickerBox}>
+                  <ColorPicker
+                    color={qrRengi}
+                    onColorChange={(color) => {
+                      setQrRengi(color);
+                      setHexInput(color);
+                    }}
+                    onColorChangeComplete={(color) => {
+                      setQrRengi(color);
+                      setHexInput(color);
+                    }}
+                    thumbSize={28}
+                    sliderSize={28}
+                    noSnap={true}
+                  />
+                </View>
+
                 <TouchableOpacity
-                  style={styles.kapatButonu}
+                  style={styles.closeSheet}
                   onPress={() => setModalGorunur(false)}
                 >
-                  <Text style={{ color: "white", fontWeight: "bold" }}>
-                    UYGULA
-                  </Text>
+                  <Text style={styles.closeSheetText}>TAMAMLA</Text>
                 </TouchableOpacity>
               </View>
             </View>
           </Modal>
-
-          <View style={styles.formAlt}>
-            <TextInput
-              style={styles.input}
-              placeholder="Link girin..."
-              onChangeText={setTempMetin}
-              value={tempMetin}
-            />
-            <TouchableOpacity style={styles.anaButon} onPress={qrOlustur}>
-              <Text style={styles.butonYazisi}>QR KODU OLUŞTUR</Text>
-            </TouchableOpacity>
-            <View style={styles.altButonlar}>
-              <TouchableOpacity
-                style={styles.islemButonu}
-                onPress={galeriyeKaydet}
-              >
-                <Text>Kaydet</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.islemButonu} onPress={paylas}>
-                <Text>Paylaş</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
         </ScrollView>
       </SafeAreaView>
     </SafeAreaProvider>
@@ -186,66 +238,137 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  disKutu: { flex: 1, backgroundColor: "#fff" },
-  baslik: { fontSize: 26, fontWeight: "bold", marginVertical: 20 },
-  qrKutu: {
-    padding: 15,
-    backgroundColor: "white",
-    borderRadius: 20,
-    elevation: 10,
+  container: { flex: 1, backgroundColor: "#FFFFFF" },
+  scrollContent: { paddingBottom: 40 },
+  headerContainer: { alignItems: "center", marginTop: 20, marginBottom: 10 },
+  brandName: {
+    fontSize: 32,
+    fontWeight: "900",
+    color: "#000",
+    letterSpacing: -1,
+  },
+  tagline: { fontSize: 14, color: "#888", fontWeight: "500" },
+  previewCard: { alignItems: "center", marginVertical: 30 },
+  qrShadowBox: {
+    padding: 18,
+    backgroundColor: "#FFF",
+    borderRadius: 32,
+    elevation: 15,
     shadowColor: "#000",
-    shadowOpacity: 0.1,
-    shadowRadius: 10,
+    shadowOpacity: 0.12,
+    shadowRadius: 25,
+  },
+  modernToolbar: {
+    flexDirection: "row",
+    justifyContent: "center",
+    gap: 15,
+    marginBottom: 30,
+  },
+  mainAction: {
+    backgroundColor: "#F2F2F7",
+    paddingVertical: 15,
+    paddingHorizontal: 25,
+    borderRadius: 20,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "#E5E5EA",
+  },
+  actionEmoji: { fontSize: 24, marginBottom: 4 },
+  actionText: { fontSize: 13, fontWeight: "bold", color: "#3A3A3C" },
+  deleteLogo: { position: "absolute", bottom: -25, alignSelf: "center" },
+  inputArea: { width: "90%", alignSelf: "center" },
+  inputWrapper: {
+    backgroundColor: "#F2F2F7",
+    borderRadius: 22,
+    paddingHorizontal: 20,
+    height: 65,
+    justifyContent: "center",
+    marginBottom: 15,
+  },
+  textInput: { fontSize: 16, fontWeight: "500", color: "#000" },
+  generateButton: {
+    backgroundColor: "#000",
+    height: 65,
+    borderRadius: 22,
+    justifyContent: "center",
+    alignItems: "center",
+    elevation: 4,
+  },
+  generateButtonText: {
+    color: "#FFF",
+    fontSize: 17,
+    fontWeight: "bold",
+    letterSpacing: 1,
+  },
+  rowButtons: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 15,
+  },
+  secondaryButton: {
+    width: "48%",
+    height: 60,
+    backgroundColor: "#FFF",
+    borderRadius: 22,
+    justifyContent: "center",
+    alignItems: "center",
+    borderWidth: 1.5,
+    borderColor: "#000",
+  },
+  secondaryButtonText: { fontWeight: "bold", color: "#000" },
+  blurOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "flex-end",
+  },
+  bottomSheet: {
+    backgroundColor: "#FFF",
+    borderTopLeftRadius: 40,
+    borderTopRightRadius: 40,
+    padding: 30,
+    alignItems: "center",
+  },
+  dragHandle: {
+    width: 40,
+    height: 5,
+    backgroundColor: "#E5E5EA",
+    borderRadius: 10,
     marginBottom: 20,
   },
-  tasarimSatiri: { flexDirection: "row", marginBottom: 20, gap: 10 },
-  ayarButonu: {
-    padding: 12,
-    borderWidth: 1,
-    borderRadius: 10,
-    borderColor: "#ddd",
+  sheetTitle: { fontSize: 20, fontWeight: "bold", marginBottom: 25 },
+  hexRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F2F2F7",
+    borderRadius: 20,
+    paddingHorizontal: 20,
+    height: 60,
+    width: "100%",
+    marginBottom: 20,
   },
-  modalMerkez: {
-    flex: 1,
-    justifyContent: "center",
-    backgroundColor: "rgba(0,0,0,0.7)",
-    padding: 20,
+  hexSymbol: {
+    fontSize: 18,
+    fontWeight: "bold",
+    color: "#8E8E93",
+    marginRight: 5,
   },
-  modalIcerik: { backgroundColor: "white", borderRadius: 20, padding: 20 },
-  panel: { height: 200, marginBottom: 20, borderRadius: 15 },
-  slider: { height: 30, marginBottom: 20, borderRadius: 10 },
-  onizlemeKutusu: { height: 40, borderRadius: 10, marginBottom: 20 },
-  kapatButonu: {
-    backgroundColor: "#000",
-    height: 50,
+  hexField: { flex: 1, fontSize: 18, fontWeight: "bold", color: "#000" },
+  colorBubble: {
+    width: 35,
+    height: 35,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: "#FFF",
+  },
+  pickerBox: { height: 280, width: "100%" },
+  closeSheet: {
+    backgroundColor: "#007AFF",
+    width: "100%",
+    height: 65,
+    borderRadius: 22,
     justifyContent: "center",
     alignItems: "center",
-    borderRadius: 10,
+    marginTop: 25,
   },
-  formAlt: { width: "90%" },
-  input: {
-    height: 55,
-    backgroundColor: "#f0f0f0",
-    borderRadius: 12,
-    paddingHorizontal: 15,
-    marginBottom: 15,
-  },
-  anaButon: {
-    height: 55,
-    backgroundColor: "#000",
-    justifyContent: "center",
-    alignItems: "center",
-    borderRadius: 12,
-    marginBottom: 15,
-  },
-  islemButonu: {
-    width: "48%",
-    height: 50,
-    backgroundColor: "#f0f0f0",
-    justifyContent: "center",
-    alignItems: "center",
-    borderRadius: 12,
-  },
-  altButonlar: { flexDirection: "row", justifyContent: "space-between" },
-  butonYazisi: { color: "white", fontWeight: "bold" },
+  closeSheetText: { color: "#FFF", fontSize: 18, fontWeight: "bold" },
 });
