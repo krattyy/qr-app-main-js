@@ -3,9 +3,11 @@ import * as MediaLibrary from "expo-media-library";
 import * as Sharing from "expo-sharing";
 import { useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Alert,
   Dimensions,
   Keyboard,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -16,6 +18,7 @@ import {
 import QRCode from "react-native-qrcode-svg";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { captureRef } from "react-native-view-shot";
+import ColorPicker from "react-native-wheel-color-picker";
 import { supabase } from "../lib/supabase";
 
 const { width } = Dimensions.get("window");
@@ -24,19 +27,16 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
   const [userQrs, setUserQrs] = useState([]);
-
-  // QR KODU TETİKLEYEN ASIL STATE
   const [metin, setMetin] = useState("https://articqr.studio");
-  // SADECE INPUT'TA GÖZÜKEN GEÇİCİ STATE
   const [tempMetin, setTempMetin] = useState("https://articqr.studio");
-
   const [qrRengi, setQrRengi] = useState("#000000");
   const [secilenLogo, setSecilenLogo] = useState(null);
   const [modalGorunur, setModalGorunur] = useState(false);
   const [paketModalGorunur, setPaketModalGorunur] = useState(false);
   const [authModalGorunur, setAuthModalGorunur] = useState(false);
   const [yukleniyor, setYukleniyor] = useState(false);
-
+  const [isimModalGorunur, setIsimModalGorunur] = useState(false);
+  const [qrIsmi, setQrIsmi] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSignUp, setIsSignUp] = useState(false);
@@ -44,37 +44,41 @@ export default function App() {
   const qrReferansi = useRef();
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      if (session) {
-        fetchProfile(session.user.id);
-        fetchUserQrs(session.user.id);
+    const initialize = async () => {
+      const {
+        data: { session: currentSession },
+      } = await supabase.auth.getSession();
+      setSession(currentSession);
+      if (currentSession) {
+        await fetchProfile(currentSession.user.id);
+        await fetchUserQrs(currentSession.user.id);
       }
-    });
+    };
+    initialize();
 
     const { data: authListener } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setSession(session);
-        if (session) {
-          fetchProfile(session.user.id);
-          fetchUserQrs(session.user.id);
+      async (_event, newSession) => {
+        setSession(newSession);
+        if (newSession) {
+          await fetchProfile(newSession.user.id);
+          await fetchUserQrs(newSession.user.id);
         } else {
           setUserProfile(null);
           setUserQrs([]);
         }
       },
     );
-
     return () => authListener.subscription.unsubscribe();
   }, []);
 
   const fetchProfile = async (uid) => {
-    const { data } = await supabase
+    const { data, error } = await supabase
       .from("profiles")
       .select("*")
       .eq("id", uid)
-      .single();
+      .maybeSingle();
     if (data) setUserProfile(data);
+    else if (error) console.log("Profil çekme hatası:", error.message);
   };
 
   const fetchUserQrs = async (uid) => {
@@ -86,6 +90,46 @@ export default function App() {
     if (data) setUserQrs(data);
   };
 
+  const testTarama = async (item) => {
+    try {
+      const { error } = await supabase.rpc("increment_scan_by_slug", {
+        target_slug: item.slug,
+      });
+      if (error) throw error;
+      fetchUserQrs(session.user.id);
+      Alert.alert("Test Başarılı ✨", `${item.title} için sayaç artırıldı!`);
+    } catch (error) {
+      Alert.alert("Hata", "Sayaç artırılamadı.");
+    }
+  };
+
+  const qrSil = (item) => {
+    Alert.alert(
+      "QR Kodu Sil",
+      `"${item.title}" adlı QR kodu kalıcı olarak silmek istediğinize emin misiniz?`,
+      [
+        { text: "Vazgeç", style: "cancel" },
+        {
+          text: "Sil",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const { error } = await supabase
+                .from("qrcodes")
+                .delete()
+                .eq("id", item.id)
+                .eq("user_id", session.user.id);
+              if (error) throw error;
+              fetchUserQrs(session.user.id);
+            } catch (error) {
+              Alert.alert("Hata", "Silinemedi, tekrar deneyin.");
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const handleAuth = async () => {
     if (!email || !password)
       return Alert.alert("Hata", "Lütfen tüm alanları doldurun.");
@@ -94,10 +138,7 @@ export default function App() {
       if (isSignUp) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        Alert.alert(
-          "Başarılı ✨",
-          "Hesabınız oluşturuldu! Şimdi giriş yapabilirsiniz.",
-        );
+        Alert.alert("Başarılı ✨", "Hesabınız oluşturuldu!");
         setIsSignUp(false);
       } else {
         const { error } = await supabase.auth.signInWithPassword({
@@ -114,62 +155,68 @@ export default function App() {
     }
   };
 
-  // QR KODU OLUŞTUR / GÜNCELLE BUTONU FONKSİYONU
   const qrOlustur = () => {
     if (!tempMetin.trim()) {
       Alert.alert("Hata", "Lütfen bir URL veya metin giriniz.");
       return;
     }
-    setMetin(tempMetin); // QR kod şimdi değişecek
-    Keyboard.dismiss(); // Klavyeyi kapat
+    setMetin(tempMetin);
+    Keyboard.dismiss();
   };
 
-  const qrKaydet = async () => {
+  const qrKaydet = () => {
     if (!session) {
       setIsSignUp(true);
       setAuthModalGorunur(true);
       return;
     }
+    setQrIsmi("");
+    setIsimModalGorunur(true);
+  };
+
+  const qrKaydetOnayla = async () => {
+    const slug = Math.random().toString(36).substring(2, 8);
+    const dinamikUrl = `https://slwtvoyymwyakklinjvr.supabase.co/functions/v1/redirect?s=${slug}`;
+    setMetin(dinamikUrl);
+    const baslik =
+      qrIsmi.trim() || tempMetin.replace("https://", "").split("/")[0];
 
     try {
       const { error } = await supabase.from("qrcodes").insert([
         {
           user_id: session.user.id,
-          title: "Yeni QR Kod",
-          target_url: metin,
+          title: baslik,
+          target_url: tempMetin,
           qr_color: qrRengi,
+          slug: slug,
         },
       ]);
       if (error) throw error;
-      Alert.alert("Başarılı ✨", "QR Kod koleksiyonuna eklendi!");
+      setIsimModalGorunur(false);
+      Alert.alert("Başarılı ✨", "Dinamik QR Kod koleksiyonuna eklendi!");
       fetchUserQrs(session.user.id);
     } catch (error) {
       Alert.alert("Hata", "Kaydedilirken bir sorun oluştu.");
     }
   };
 
-  const premiumOzellikKontrol = () => {
-    if (!session) {
+  const logoSec = async () => {
+    if (
+      !session ||
+      !userProfile ||
+      !userProfile.plan_type ||
+      userProfile.plan_type === "free"
+    ) {
       Alert.alert(
-        "Üyelik Gereklidir",
-        "Logo eklemek ve QR kodunuzu takip etmek için ücretsiz üye olmalısınız.",
+        "Premium Özellik 🔒",
+        "Logo eklemek için Plus plana sahip olmalısınız.",
         [
           { text: "Vazgeç", style: "cancel" },
-          {
-            text: "Üye Ol",
-            onPress: () => {
-              setIsSignUp(true);
-              setAuthModalGorunur(true);
-            },
-          },
+          { text: "Planları Gör", onPress: () => setPaketModalGorunur(true) },
         ],
       );
-      return false;
+      return;
     }
-    return true;
-  };
-
-  const logoSec = async () => {
     let sonuc = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ["images"],
       allowsEditing: true,
@@ -194,6 +241,9 @@ export default function App() {
     }
   };
 
+  const isLocked =
+    !session || !userProfile?.plan_type || userProfile?.plan_type === "free";
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
@@ -209,11 +259,14 @@ export default function App() {
                 session
                   ? Alert.alert(
                       "Profil",
-                      `Plan: ${userProfile?.plan_type?.toUpperCase()}\nEmail: ${session.user.email}`,
+                      `Plan: ${(userProfile?.plan_type || "free").toUpperCase()}\nEmail: ${session.user.email}`,
                       [
                         {
                           text: "Çıkış Yap",
-                          onPress: () => supabase.auth.signOut(),
+                          onPress: () => {
+                            supabase.auth.signOut();
+                            setUserProfile(null);
+                          },
                           style: "destructive",
                         },
                         { text: "Kapat" },
@@ -239,7 +292,7 @@ export default function App() {
               style={styles.qrShadowBox}
             >
               <QRCode
-                value={metin} // Sadece butona basınca değişen asıl metin
+                value={metin}
                 size={width * 0.55}
                 color={qrRengi}
                 backgroundColor="white"
@@ -250,22 +303,19 @@ export default function App() {
                 quietZone={10}
               />
             </View>
-            {!session && (
+            {isLocked && (
               <TouchableOpacity
                 style={styles.promoBadge}
-                onPress={() => {
-                  setIsSignUp(true);
-                  setAuthModalGorunur(true);
-                }}
+                onPress={() => setPaketModalGorunur(true)}
               >
                 <Text style={styles.promoText}>
-                  💡 Bu QR'ı daha sonra düzenlemek için ücretsiz üye ol.
+                  💡 Logo ve Dinamik QR için Plus plana geç.
                 </Text>
               </TouchableOpacity>
             )}
           </View>
 
-          {/* ACTIONS */}
+          {/* TOOLBAR */}
           <View style={styles.modernToolbar}>
             <TouchableOpacity
               style={styles.mainAction}
@@ -275,11 +325,11 @@ export default function App() {
               <Text style={styles.actionText}>Renk</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.mainAction, !session && { opacity: 0.7 }]}
-              onPress={() => premiumOzellikKontrol() && logoSec()}
+              style={[styles.mainAction, isLocked && { opacity: 0.7 }]}
+              onPress={logoSec}
             >
-              <Text style={styles.actionEmoji}>✨</Text>
-              <Text style={styles.actionText}>Logo {!session && "🔒"}</Text>
+              <Text style={styles.actionEmoji}>✨{isLocked ? "🔒" : ""}</Text>
+              <Text style={styles.actionText}>Logo</Text>
             </TouchableOpacity>
           </View>
 
@@ -289,13 +339,11 @@ export default function App() {
               <TextInput
                 style={styles.textInput}
                 placeholder="URL giriniz..."
-                onChangeText={setTempMetin} // Sadece geçici state'i günceller
+                onChangeText={setTempMetin}
                 value={tempMetin}
                 autoCapitalize="none"
               />
             </View>
-
-            {/* OLUŞTUR BUTONU - QR'ı TETİKLEYEN BU */}
             <TouchableOpacity
               style={[styles.dynamicButton, { backgroundColor: "#000" }]}
               onPress={qrOlustur}
@@ -304,16 +352,16 @@ export default function App() {
                 QR KODU OLUŞTUR
               </Text>
             </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.dynamicButton}
-              onPress={() => setPaketModalGorunur(true)}
-            >
-              <Text style={styles.dynamicButtonText}>
-                ⚡ DİNAMİK QR'A YÜKSELT
-              </Text>
-            </TouchableOpacity>
-
+            {isLocked && (
+              <TouchableOpacity
+                style={styles.dynamicButton}
+                onPress={() => setPaketModalGorunur(true)}
+              >
+                <Text style={styles.dynamicButtonText}>
+                  ⚡ DİNAMİK QR'A YÜKSELT
+                </Text>
+              </TouchableOpacity>
+            )}
             {session && (
               <TouchableOpacity
                 style={[
@@ -323,19 +371,16 @@ export default function App() {
                 onPress={qrKaydet}
               >
                 <Text style={styles.dynamicButtonText}>
-                  📁 KOLEKSİYONA KAYDET
+                  📁 DİNAMİK QR OLUŞTUR VE KAYDET
                 </Text>
               </TouchableOpacity>
             )}
-
             <View style={styles.rowButtons}>
               <TouchableOpacity
                 style={styles.secondaryButton}
                 onPress={galeriyeKaydet}
               >
-                <Text style={styles.secondaryButtonText}>
-                  💾 İndir (Reklamlı)
-                </Text>
+                <Text style={styles.secondaryButtonText}>💾 İndir</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.secondaryButton}
@@ -349,47 +394,301 @@ export default function App() {
             </View>
           </View>
 
-          {/* DASHBOARD */}
-          {session && userQrs.length > 0 && (
+          {/* KOLEKSİYON LİSTESİ */}
+          {session && (
             <View style={styles.dashboardContainer}>
-              <Text style={styles.dashboardTitle}>
-                Koleksiyonum ({userQrs.length})
-              </Text>
-              {userQrs.map((item) => (
-                <View key={item.id} style={styles.qrItemCard}>
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={{ fontWeight: "bold", fontSize: 16 }}
-                      numberOfLines={1}
-                    >
-                      {item.title}
-                    </Text>
-                    <Text
-                      style={{ color: "#888", fontSize: 12 }}
-                      numberOfLines={1}
-                    >
-                      {item.target_url}
-                    </Text>
-                  </View>
-                  <TouchableOpacity
-                    onPress={() =>
-                      Alert.alert(
-                        "Düzenle",
-                        "Dinamik link değiştirme özelliği yakında!",
-                      )
-                    }
-                  >
-                    <Text style={{ color: "#007AFF", fontWeight: "bold" }}>
-                      Düzenle
-                    </Text>
-                  </TouchableOpacity>
+              <View style={styles.dashboardHeaderRow}>
+                <Text style={styles.dashboardTitle}>Koleksiyonum</Text>
+                <TouchableOpacity onPress={() => fetchUserQrs(session.user.id)}>
+                  <Text style={{ color: "#007AFF" }}>Yenile ↻</Text>
+                </TouchableOpacity>
+              </View>
+              {userQrs.length === 0 ? (
+                <View style={styles.emptyState}>
+                  <Text style={{ color: "#888" }}>
+                    Henüz bir QR kod kaydetmedin.
+                  </Text>
                 </View>
-              ))}
+              ) : (
+                userQrs.map((item) => (
+                  <View key={item.id} style={styles.qrItemCard}>
+                    <View style={{ flex: 1 }}>
+                      <Text
+                        style={{ fontWeight: "bold", fontSize: 15 }}
+                        numberOfLines={1}
+                      >
+                        {item.title}
+                      </Text>
+                      <View style={styles.scanBadge}>
+                        <Text style={styles.scanText}>
+                          📊 {item.scans || 0} Tarama
+                        </Text>
+                      </View>
+                    </View>
+                    <View style={{ flexDirection: "row" }}>
+                      <TouchableOpacity
+                        style={styles.editBtn}
+                        onPress={() => {
+                          setTempMetin(item.target_url);
+                          setMetin(
+                            `https://slwtvoyymwyakklinjvr.supabase.co/functions/v1/redirect?s=${item.slug}`,
+                          );
+                          setQrRengi(item.qr_color || "#000000");
+                          Alert.alert(
+                            "Yüklendi",
+                            "Düzenleme için yukarı aktarıldı.",
+                          );
+                        }}
+                      >
+                        <Text
+                          style={{
+                            color: "#FFF",
+                            fontWeight: "bold",
+                            fontSize: 12,
+                          }}
+                        >
+                          Düzenle
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.editBtn,
+                          { backgroundColor: "#34C759", marginLeft: 5 },
+                        ]}
+                        onPress={() => testTarama(item)}
+                      >
+                        <Text
+                          style={{
+                            color: "#FFF",
+                            fontWeight: "bold",
+                            fontSize: 12,
+                          }}
+                        >
+                          Test Et
+                        </Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={[
+                          styles.editBtn,
+                          { backgroundColor: "#FF3B30", marginLeft: 5 },
+                        ]}
+                        onPress={() => qrSil(item)}
+                      >
+                        <Text
+                          style={{
+                            color: "#FFF",
+                            fontWeight: "bold",
+                            fontSize: 12,
+                          }}
+                        >
+                          Sil
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                ))
+              )}
             </View>
           )}
 
-          {/* MODALLAR (Aynı Şekilde Devam) */}
-          {/* ... Modal kodları öncekiyle aynı ... */}
+          {/* MODALLAR (İsim, Renk, Auth, Paket) */}
+          <Modal
+            visible={isimModalGorunur}
+            animationType="fade"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View style={styles.authCard}>
+                <Text style={styles.authTitle}>QR Koda İsim Ver</Text>
+                <TextInput
+                  style={styles.authInput}
+                  placeholder="Örn: Instagram QR..."
+                  value={qrIsmi}
+                  onChangeText={setQrIsmi}
+                  autoFocus
+                  maxLength={40}
+                />
+                <TouchableOpacity
+                  style={styles.authMainBtn}
+                  onPress={qrKaydetOnayla}
+                >
+                  <Text style={{ color: "#FFF", fontWeight: "bold" }}>
+                    💾 KAYDET
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setIsimModalGorunur(false)}
+                  style={{ marginTop: 15 }}
+                >
+                  <Text style={{ color: "#888" }}>Vazgeç</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal
+            visible={modalGorunur}
+            animationType="slide"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View style={styles.bottomSheet}>
+                <View style={styles.dragHandle} />
+                <Text style={styles.sheetTitle}>Renk Seçimi</Text>
+                <View style={styles.pickerBox}>
+                  <ColorPicker
+                    color={qrRengi}
+                    onColorChange={(color) => setQrRengi(color)}
+                    thumbSize={28}
+                    sliderSize={28}
+                    noSnap
+                  />
+                </View>
+                <TouchableOpacity
+                  style={styles.closeSheet}
+                  onPress={() => setModalGorunur(false)}
+                >
+                  <Text style={styles.closeSheetText}>TAMAM</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal
+            visible={authModalGorunur}
+            animationType="fade"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View style={styles.authCard}>
+                <Text style={styles.authTitle}>
+                  {isSignUp ? "Hesap Oluştur" : "Giriş Yap"}
+                </Text>
+                <TextInput
+                  style={styles.authInput}
+                  placeholder="E-posta"
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                />
+                <TextInput
+                  style={styles.authInput}
+                  placeholder="Şifre"
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry
+                />
+                <TouchableOpacity
+                  style={styles.authMainBtn}
+                  onPress={handleAuth}
+                >
+                  {yukleniyor ? (
+                    <ActivityIndicator color="#FFF" />
+                  ) : (
+                    <Text style={{ color: "#FFF", fontWeight: "bold" }}>
+                      {isSignUp ? "Kayıt Ol" : "Giriş Yap"}
+                    </Text>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setIsSignUp(!isSignUp)}
+                  style={{ marginTop: 15 }}
+                >
+                  <Text style={{ color: "#007AFF" }}>
+                    {isSignUp ? "Giriş Yap" : "Kayıt Ol"}
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setAuthModalGorunur(false)}
+                  style={{ marginTop: 15 }}
+                >
+                  <Text style={{ color: "#888" }}>Vazgeç</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+
+          <Modal visible={paketModalGorunur} animationType="slide">
+            <SafeAreaView style={styles.paywallContainer}>
+              <TouchableOpacity
+                onPress={() => setPaketModalGorunur(false)}
+                style={styles.closePaywall}
+              >
+                <Text style={{ fontSize: 24, fontWeight: "bold" }}>✕</Text>
+              </TouchableOpacity>
+              <ScrollView contentContainerStyle={{ padding: 20 }}>
+                <Text style={styles.paywallTitle}>
+                  Planını Seç, Markanı Büyüt 🚀
+                </Text>
+                <View style={styles.planCard}>
+                  <View style={styles.planHeader}>
+                    <Text style={styles.planName}>Plus</Text>
+                    <Text style={styles.planPrice}>$4.99/ay</Text>
+                  </View>
+                  <Text style={styles.planFeature}>• 5 Adet Dinamik QR</Text>
+                  <Text style={styles.planFeature}>• Özel Logo Ekleme</Text>
+                  <TouchableOpacity
+                    style={styles.planButton}
+                    onPress={() => {
+                      setPaketModalGorunur(false);
+                      setIsSignUp(true);
+                      setAuthModalGorunur(true);
+                    }}
+                  >
+                    <Text style={styles.planButtonText}>
+                      {session ? "PLANA GEÇ" : "KAYIT OL VE SEÇ"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <View
+                  style={[
+                    styles.planCard,
+                    { borderColor: "#007AFF", borderWidth: 2 },
+                  ]}
+                >
+                  <View style={styles.planHeader}>
+                    <Text style={styles.planName}>Pro 🔥</Text>
+                    <Text style={styles.planPrice}>$9.99/ay</Text>
+                  </View>
+                  <Text style={styles.planFeature}>• 25 Adet Dinamik QR</Text>
+                  <Text style={styles.planFeature}>
+                    • Vektörel (SVG/PDF) Çıktı
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.planButton, { backgroundColor: "#007AFF" }]}
+                    onPress={() => {
+                      setPaketModalGorunur(false);
+                      setIsSignUp(true);
+                      setAuthModalGorunur(true);
+                    }}
+                  >
+                    <Text style={styles.planButtonText}>
+                      {session ? "PRO'YU SEÇ" : "KAYIT OL VE SEÇ"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <View style={styles.planCard}>
+                  <View style={styles.planHeader}>
+                    <Text style={styles.planName}>Agency</Text>
+                    <Text style={styles.planPrice}>$39.00/ay</Text>
+                  </View>
+                  <Text style={styles.planFeature}>• 200 Adet Dinamik QR</Text>
+                  <TouchableOpacity
+                    style={styles.planButton}
+                    onPress={() => {
+                      setPaketModalGorunur(false);
+                      setIsSignUp(true);
+                      setAuthModalGorunur(true);
+                    }}
+                  >
+                    <Text style={styles.planButtonText}>
+                      {session ? "AGENCY'YE GEÇ" : "KAYIT OL VE SEÇ"}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </ScrollView>
+            </SafeAreaView>
+          </Modal>
         </ScrollView>
       </SafeAreaView>
     </SafeAreaProvider>
@@ -397,7 +696,6 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  // Stiller önceki kodla aynı, sadece dashboard ve input için gerekli olanları koruyun
   container: { flex: 1, backgroundColor: "#FFFFFF" },
   scrollContent: { paddingBottom: 60 },
   headerContainer: {
@@ -475,7 +773,13 @@ const styles = StyleSheet.create({
   },
   secondaryButtonText: { fontWeight: "bold" },
   dashboardContainer: { paddingHorizontal: 20, marginTop: 30 },
-  dashboardTitle: { fontSize: 22, fontWeight: "800", marginBottom: 15 },
+  dashboardHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 15,
+  },
+  dashboardTitle: { fontSize: 22, fontWeight: "800" },
   qrItemCard: {
     backgroundColor: "#F9F9F9",
     padding: 15,
@@ -486,6 +790,28 @@ const styles = StyleSheet.create({
     marginBottom: 10,
     borderWidth: 1,
     borderColor: "#EEE",
+  },
+  scanBadge: {
+    backgroundColor: "#E8F2FF",
+    alignSelf: "flex-start",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    marginTop: 5,
+  },
+  scanText: { fontSize: 11, color: "#007AFF", fontWeight: "bold" },
+  editBtn: {
+    backgroundColor: "#000",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 12,
+    justifyContent: "center",
+  },
+  emptyState: {
+    alignItems: "center",
+    padding: 40,
+    backgroundColor: "#F9F9F9",
+    borderRadius: 20,
   },
   blurOverlay: {
     flex: 1,
@@ -537,12 +863,12 @@ const styles = StyleSheet.create({
   },
   planName: { fontSize: 22, fontWeight: "800" },
   planPrice: { fontSize: 18, color: "#007AFF", fontWeight: "700" },
-  planFeature: { fontSize: 15, color: "#333" },
+  planFeature: { fontSize: 15, color: "#333", marginBottom: 2 },
   planButton: {
     backgroundColor: "#000",
     padding: 16,
     borderRadius: 18,
-    marginTop: 15,
+    marginTop: 10,
     alignItems: "center",
   },
   planButtonText: { color: "#FFF", fontWeight: "bold" },
