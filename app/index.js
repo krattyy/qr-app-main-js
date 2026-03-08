@@ -1,9 +1,11 @@
+// app/index.js
+
 import * as ImagePicker from "expo-image-picker";
 import * as MediaLibrary from "expo-media-library";
 import * as Print from "expo-print";
-
 import * as Sharing from "expo-sharing";
-import { useEffect, useRef, useState } from "react";
+import QRCodeGenerator from "qrcode";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -17,15 +19,23 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
-import QRCode from "react-native-qrcode-svg";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import Svg, {
+  Circle,
+  Defs,
+  G,
+  LinearGradient,
+  Path,
+  Rect,
+  Stop,
+  Image as SvgImage,
+} from "react-native-svg";
 import { captureRef } from "react-native-view-shot";
 import ColorPicker from "react-native-wheel-color-picker";
 import { supabase } from "../lib/supabase";
 
 const { width } = Dimensions.get("window");
 
-// --- SABİTLER ---
 const PREMIUM_PALETTES = [
   { id: 1, name: "Ocean", colors: ["#2E3192", "#1BFFFF"] },
   { id: 2, name: "Sunset", colors: ["#FF512F", "#DD2476"] },
@@ -34,65 +44,465 @@ const PREMIUM_PALETTES = [
   { id: 5, name: "Cyber", colors: ["#000000", "#34C759"] },
 ];
 
-// Gradyan yönleri
 const GRAD_DIRECTIONS = [
-  {
-    id: "diag",
-    label: "Çapraz",
-    emoji: "↗️",
-    dir: ["0%", "0%", "100%", "100%"],
-  },
-  {
-    id: "horiz",
-    label: "Yatay",
-    emoji: "↔️",
-    dir: ["0%", "50%", "100%", "50%"],
-  },
-  {
-    id: "vert",
-    label: "Dikey",
-    emoji: "↕️",
-    dir: ["50%", "0%", "50%", "100%"],
-  },
+  { id: "diag", label: "Capraz", emoji: "↗️" },
+  { id: "horiz", label: "Yatay", emoji: "↔️" },
+  { id: "vert", label: "Dikey", emoji: "↕️" },
 ];
 
+const QR_PATTERNS = [
+  { id: "square", label: "Kare", premium: false },
+  { id: "rounded", label: "Yuvarlak", premium: false },
+  { id: "dots", label: "Nokta", premium: false },
+  { id: "soft", label: "Soft", premium: true },
+  { id: "classy", label: "Classy", premium: true },
+];
+
+const QR_EYES = [
+  { id: "square", label: "Kare", premium: false },
+  { id: "rounded", label: "Yuvarlak", premium: false },
+  { id: "circle", label: "Daire", premium: false },
+  { id: "soft", label: "Soft", premium: true },
+  { id: "diamond", label: "Diamond", premium: true },
+];
+
+const QUIET_ZONE = 10;
+const LOGO_SIZE_RATIO = 0.22;
+
+const getPatternRadius = (pattern, moduleSize) => {
+  switch (pattern) {
+    case "rounded":
+      return moduleSize * 0.35;
+    case "soft":
+      return moduleSize * 0.22;
+    case "classy":
+      return moduleSize * 0.18;
+    default:
+      return 0;
+  }
+};
+
+const getEyeRadius = (eyeStyle, size) => {
+  switch (eyeStyle) {
+    case "rounded":
+      return size * 0.2;
+    case "soft":
+      return size * 0.28;
+    default:
+      return 0;
+  }
+};
+
+const shouldSkipForLogo = (x, y, moduleSize, qrPixelSize, logoSize) => {
+  const qrCenter = qrPixelSize / 2;
+  const half = logoSize / 2;
+  const padding = moduleSize * 1.2;
+  return (
+    x < qrCenter + half + padding &&
+    x + moduleSize > qrCenter - half - padding &&
+    y < qrCenter + half + padding &&
+    y + moduleSize > qrCenter - half - padding
+  );
+};
+
+function QRModule({ x, y, moduleSize, pattern, fill }) {
+  if (pattern === "dots") {
+    return (
+      <Circle
+        cx={x + moduleSize / 2}
+        cy={y + moduleSize / 2}
+        r={moduleSize * 0.38}
+        fill={fill}
+      />
+    );
+  }
+  if (pattern === "classy") {
+    return (
+      <Path
+        d={`M ${x} ${y + moduleSize * 0.25} Q ${x} ${y} ${x + moduleSize * 0.25} ${y} L ${x + moduleSize} ${y} L ${x + moduleSize} ${y + moduleSize * 0.75} Q ${x + moduleSize} ${y + moduleSize} ${x + moduleSize * 0.75} ${y + moduleSize} L ${x} ${y + moduleSize} Z`}
+        fill={fill}
+      />
+    );
+  }
+  return (
+    <Rect
+      x={x}
+      y={y}
+      width={moduleSize}
+      height={moduleSize}
+      rx={getPatternRadius(pattern, moduleSize)}
+      ry={getPatternRadius(pattern, moduleSize)}
+      fill={fill}
+    />
+  );
+}
+
+function QREye({ x, y, moduleSize, eyeStyle, fill }) {
+  const outerSize = moduleSize * 7;
+  const innerOffset = moduleSize * 2;
+  const innerSize = moduleSize * 3;
+
+  if (eyeStyle === "circle") {
+    return (
+      <G>
+        <Circle
+          cx={x + outerSize / 2}
+          cy={y + outerSize / 2}
+          r={outerSize / 2}
+          fill={fill}
+        />
+        <Circle
+          cx={x + outerSize / 2}
+          cy={y + outerSize / 2}
+          r={outerSize / 2 - moduleSize}
+          fill="white"
+        />
+        <Circle
+          cx={x + outerSize / 2}
+          cy={y + outerSize / 2}
+          r={innerSize / 2}
+          fill={fill}
+        />
+      </G>
+    );
+  }
+  if (eyeStyle === "diamond") {
+    const cx = x + outerSize / 2;
+    const cy = y + outerSize / 2;
+    const half = outerSize / 2;
+    const innerHalf = innerSize / 2;
+    return (
+      <G>
+        <Path
+          d={`M ${cx} ${cy - half} L ${cx + half} ${cy} L ${cx} ${cy + half} L ${cx - half} ${cy} Z`}
+          fill={fill}
+        />
+        <Path
+          d={`M ${cx} ${cy - (half - moduleSize)} L ${cx + (half - moduleSize)} ${cy} L ${cx} ${cy + (half - moduleSize)} L ${cx - (half - moduleSize)} ${cy} Z`}
+          fill="white"
+        />
+        <Path
+          d={`M ${cx} ${cy - innerHalf} L ${cx + innerHalf} ${cy} L ${cx} ${cy + innerHalf} L ${cx - innerHalf} ${cy} Z`}
+          fill={fill}
+        />
+      </G>
+    );
+  }
+  return (
+    <G>
+      <Rect
+        x={x}
+        y={y}
+        width={outerSize}
+        height={outerSize}
+        rx={getEyeRadius(eyeStyle, outerSize)}
+        ry={getEyeRadius(eyeStyle, outerSize)}
+        fill={fill}
+      />
+      <Rect
+        x={x + moduleSize}
+        y={y + moduleSize}
+        width={outerSize - moduleSize * 2}
+        height={outerSize - moduleSize * 2}
+        rx={getEyeRadius(eyeStyle, outerSize - moduleSize * 2)}
+        ry={getEyeRadius(eyeStyle, outerSize - moduleSize * 2)}
+        fill="white"
+      />
+      <Rect
+        x={x + innerOffset}
+        y={y + innerOffset}
+        width={innerSize}
+        height={innerSize}
+        rx={eyeStyle === "square" ? 0 : innerSize * 0.22}
+        ry={eyeStyle === "square" ? 0 : innerSize * 0.22}
+        fill={fill}
+      />
+    </G>
+  );
+}
+
+function StyledQRCode({
+  value,
+  size,
+  solidColor,
+  isGradient,
+  gradColors,
+  gradDir,
+  gradyanModu,
+  logoUri,
+  pattern,
+  eyeStyle,
+}) {
+  const matrix = useMemo(() => {
+    try {
+      const qr = QRCodeGenerator.create(value || "https://articqr.studio", {
+        errorCorrectionLevel: "H",
+        margin: 0,
+      });
+      return { size: qr.modules.size, data: Array.from(qr.modules.data) };
+    } catch {
+      const qr = QRCodeGenerator.create("https://articqr.studio", {
+        errorCorrectionLevel: "H",
+        margin: 0,
+      });
+      return { size: qr.modules.size, data: Array.from(qr.modules.data) };
+    }
+  }, [value]);
+
+  const qrPixelSize = size;
+  const moduleSize = (qrPixelSize - QUIET_ZONE * 2) / matrix.size;
+  const logoSize = logoUri ? qrPixelSize * LOGO_SIZE_RATIO : 0;
+  const fillRef = isGradient ? "url(#qrGradient)" : solidColor;
+
+  const getFullGradCoords = () => {
+    const dirId = gradDir?.[0];
+    switch (dirId) {
+      case "horiz":
+        return { x1: 0, y1: 0, x2: size, y2: 0 };
+      case "vert":
+        return { x1: 0, y1: 0, x2: 0, y2: size };
+      default:
+        return { x1: 0, y1: 0, x2: size, y2: size };
+    }
+  };
+
+  const eyePositions = [
+    { x: QUIET_ZONE, y: QUIET_ZONE, type: "tl" },
+    {
+      x: QUIET_ZONE + moduleSize * (matrix.size - 7),
+      y: QUIET_ZONE,
+      type: "tr",
+    },
+    {
+      x: QUIET_ZONE,
+      y: QUIET_ZONE + moduleSize * (matrix.size - 7),
+      type: "bl",
+    },
+  ];
+
+  const renderGradient = () => {
+    if (!isGradient) return null;
+    if (gradyanModu === "full") {
+      const { x1, y1, x2, y2 } = getFullGradCoords();
+      return (
+        <LinearGradient
+          id="qrGradient"
+          x1={x1}
+          y1={y1}
+          x2={x2}
+          y2={y2}
+          gradientUnits="userSpaceOnUse"
+        >
+          <Stop offset="0%" stopColor={gradColors[0]} />
+          <Stop offset="100%" stopColor={gradColors[1]} />
+        </LinearGradient>
+      );
+    }
+    return (
+      <LinearGradient id="qrGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+        <Stop offset="0%" stopColor={gradColors[0]} />
+        <Stop offset="100%" stopColor={gradColors[1]} />
+      </LinearGradient>
+    );
+  };
+
+  return (
+    <Svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      <Defs>{renderGradient()}</Defs>
+      <Rect x={0} y={0} width={size} height={size} fill="white" />
+      {matrix.data.map((filled, index) => {
+        if (!filled) return null;
+        const row = Math.floor(index / matrix.size);
+        const col = index % matrix.size;
+        if (row <= 6 && col <= 6) return null;
+        if (row <= 6 && col >= matrix.size - 7) return null;
+        if (row >= matrix.size - 7 && col <= 6) return null;
+        const x = QUIET_ZONE + col * moduleSize;
+        const y = QUIET_ZONE + row * moduleSize;
+        if (
+          logoUri &&
+          shouldSkipForLogo(x, y, moduleSize, qrPixelSize, logoSize)
+        )
+          return null;
+        return (
+          <QRModule
+            key={`m-${row}-${col}`}
+            x={x}
+            y={y}
+            moduleSize={moduleSize}
+            pattern={pattern}
+            fill={fillRef}
+          />
+        );
+      })}
+      {eyePositions.map((eye) => (
+        <QREye
+          key={eye.type}
+          x={eye.x}
+          y={eye.y}
+          moduleSize={moduleSize}
+          eyeStyle={eyeStyle}
+          fill={fillRef}
+        />
+      ))}
+      {logoUri ? (
+        <G>
+          <Rect
+            x={size / 2 - logoSize / 2 - moduleSize * 0.8}
+            y={size / 2 - logoSize / 2 - moduleSize * 0.8}
+            width={logoSize + moduleSize * 1.6}
+            height={logoSize + moduleSize * 1.6}
+            rx={12}
+            ry={12}
+            fill="white"
+          />
+          <SvgImage
+            x={size / 2 - logoSize / 2}
+            y={size / 2 - logoSize / 2}
+            width={logoSize}
+            height={logoSize}
+            href={{ uri: logoUri }}
+            preserveAspectRatio="xMidYMid slice"
+          />
+        </G>
+      ) : null}
+    </Svg>
+  );
+}
+
+function MiniPatternPreview({ pattern, active }) {
+  const fill = active ? "#007AFF" : "#1C1C1E";
+  const bg = active ? "#EAF3FF" : "#F5F5F7";
+  return (
+    <Svg width={42} height={42} viewBox="0 0 42 42">
+      <Rect x={0} y={0} width={42} height={42} rx={10} fill={bg} />
+      {[0, 1, 2, 3].map((r) =>
+        [0, 1, 2, 3].map((c) => {
+          const x = 8 + c * 7;
+          const y = 8 + r * 7;
+          if (pattern === "dots")
+            return (
+              <Circle
+                key={`${r}-${c}`}
+                cx={x + 2}
+                cy={y + 2}
+                r={2}
+                fill={fill}
+              />
+            );
+          if (pattern === "classy")
+            return (
+              <Path
+                key={`${r}-${c}`}
+                d={`M ${x} ${y + 1.2} Q ${x} ${y} ${x + 1.2} ${y} L ${x + 4} ${y} L ${x + 4} ${y + 2.8} Q ${x + 4} ${y + 4} ${x + 2.8} ${y + 4} L ${x} ${y + 4} Z`}
+                fill={fill}
+              />
+            );
+          const rx = pattern === "rounded" ? 1.5 : pattern === "soft" ? 1 : 0;
+          return (
+            <Rect
+              key={`${r}-${c}`}
+              x={x}
+              y={y}
+              width={4}
+              height={4}
+              rx={rx}
+              ry={rx}
+              fill={fill}
+            />
+          );
+        }),
+      )}
+    </Svg>
+  );
+}
+
+function MiniEyePreview({ eyeStyle, active }) {
+  const fill = active ? "#007AFF" : "#1C1C1E";
+  const bg = active ? "#EAF3FF" : "#F5F5F7";
+  return (
+    <Svg width={42} height={42} viewBox="0 0 42 42">
+      <Rect x={0} y={0} width={42} height={42} rx={10} fill={bg} />
+      {eyeStyle === "circle" ? (
+        <>
+          <Circle cx={21} cy={21} r={12} fill={fill} />
+          <Circle cx={21} cy={21} r={8} fill="white" />
+          <Circle cx={21} cy={21} r={4} fill={fill} />
+        </>
+      ) : eyeStyle === "diamond" ? (
+        <>
+          <Path d="M21 8 L34 21 L21 34 L8 21 Z" fill={fill} />
+          <Path d="M21 12.5 L29.5 21 L21 29.5 L12.5 21 Z" fill="white" />
+          <Path d="M21 16.5 L25.5 21 L21 25.5 L16.5 21 Z" fill={fill} />
+        </>
+      ) : (
+        <>
+          <Rect
+            x={9}
+            y={9}
+            width={24}
+            height={24}
+            rx={eyeStyle === "square" ? 0 : eyeStyle === "rounded" ? 5 : 7}
+            ry={eyeStyle === "square" ? 0 : eyeStyle === "rounded" ? 5 : 7}
+            fill={fill}
+          />
+          <Rect
+            x={13}
+            y={13}
+            width={16}
+            height={16}
+            rx={eyeStyle === "square" ? 0 : eyeStyle === "rounded" ? 4 : 5}
+            ry={eyeStyle === "square" ? 0 : eyeStyle === "rounded" ? 4 : 5}
+            fill="white"
+          />
+          <Rect
+            x={17}
+            y={17}
+            width={8}
+            height={8}
+            rx={eyeStyle === "square" ? 0 : 2}
+            ry={eyeStyle === "square" ? 0 : 2}
+            fill={fill}
+          />
+        </>
+      )}
+    </Svg>
+  );
+}
+
 export default function App() {
-  // --- AUTH & DATA ---
   const [session, setSession] = useState(null);
   const [userProfile, setUserProfile] = useState(null);
   const [userQrs, setUserQrs] = useState([]);
 
-  // --- QR İÇERİK ---
   const [metin, setMetin] = useState("https://articqr.studio");
   const [tempMetin, setTempMetin] = useState("https://articqr.studio");
 
-  // --- TEMEL TASARIM ---
   const [qrRengi, setQrRengi] = useState("#000000");
   const [hexInput, setHexInput] = useState("#000000");
   const [secilenLogo, setSecilenLogo] = useState(null);
   const [kenarYuvarlakligi, setKenarYuvarlakligi] = useState(0);
+  const [selectedPattern, setSelectedPattern] = useState("square");
+  const [selectedEye, setSelectedEye] = useState("square");
 
-  // --- GRADIENT ---
   const [isGradient, setIsGradient] = useState(false);
   const [premiumPalet, setPremiumPalet] = useState(null);
   const [ozelGradyanRenk1, setOzelGradyanRenk1] = useState("#FF512F");
   const [ozelGradyanRenk2, setOzelGradyanRenk2] = useState("#DD2476");
   const [hexGrad1, setHexGrad1] = useState("#FF512F");
   const [hexGrad2, setHexGrad2] = useState("#DD2476");
-  const [aktifGradyanSlot, setAktifGradyanSlot] = useState(1); // hangi renk seçiliyor
-
-  // --- PATTERN ---
+  const [aktifGradyanSlot, setAktifGradyanSlot] = useState(1);
   const [secilenYon, setSecilenYon] = useState(GRAD_DIRECTIONS[0]);
+  const [gradyanModu, setGradyanModu] = useState("full");
 
-  // --- MODAL GÖRÜNÜRLÜKLERI ---
   const [renkModalGorunur, setRenkModalGorunur] = useState(false);
   const [gradyanModalGorunur, setGradyanModalGorunur] = useState(false);
   const [paketModalGorunur, setPaketModalGorunur] = useState(false);
   const [authModalGorunur, setAuthModalGorunur] = useState(false);
   const [isimModalGorunur, setIsimModalGorunur] = useState(false);
   const [indirModalGorunur, setIndirModalGorunur] = useState(false);
+  const [paylasModalGorunur, setPaylasModalGorunur] = useState(false);
 
-  // --- AUTH FORM ---
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isSignUp, setIsSignUp] = useState(false);
@@ -100,23 +510,14 @@ export default function App() {
   const [qrIsmi, setQrIsmi] = useState("");
 
   const qrReferansi = useRef();
-  const qrSvgRef = useRef();
+  const scrollViewRef = useRef();
 
-  // ── HESAPLANAN DEĞERLER ──────────────────────────────────────────────────
-  const isLocked =
-    !session || !userProfile?.plan_type || userProfile?.plan_type === "free";
-
-  // Aktif gradyan renkleri: palet seçiliyse paletinkiler, değilse özel renkler
+  const isLocked = !session || userProfile?.plan_type === "free";
   const activeGrad1 = premiumPalet ? premiumPalet[0] : ozelGradyanRenk1;
   const activeGrad2 = premiumPalet ? premiumPalet[1] : ozelGradyanRenk2;
-
-  // Pattern gradient aktif mi?
   const gradyanAktif = !isLocked && isGradient;
+  const gradDir = [secilenYon.id];
 
-  // QR'a giden gradyan direction
-  const gradDir = secilenYon.dir;
-
-  // ── INIT ────────────────────────────────────────────────────────────────
   useEffect(() => {
     const initialize = async () => {
       const {
@@ -144,15 +545,13 @@ export default function App() {
     return () => authListener.subscription.unsubscribe();
   }, []);
 
-  // ── SUPABASE ─────────────────────────────────────────────────────────────
   const fetchProfile = async (uid) => {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from("profiles")
       .select("*")
       .eq("id", uid)
       .maybeSingle();
     if (data) setUserProfile(data);
-    else if (error) console.log("Profil hatası:", error.message);
   };
 
   const fetchUserQrs = async (uid) => {
@@ -164,22 +563,9 @@ export default function App() {
     if (data) setUserQrs(data);
   };
 
-  const testTarama = async (item) => {
-    try {
-      const { error } = await supabase.rpc("increment_scan_by_slug", {
-        target_slug: item.slug,
-      });
-      if (error) throw error;
-      fetchUserQrs(session.user.id);
-      Alert.alert("Test Başarılı ✨", `${item.title} için sayaç artırıldı!`);
-    } catch {
-      Alert.alert("Hata", "Sayaç artırılamadı.");
-    }
-  };
-
   const qrSil = (item) => {
     Alert.alert("QR Kodu Sil", `"${item.title}" silinsin mi?`, [
-      { text: "Vazgeç", style: "cancel" },
+      { text: "Vazgec", style: "cancel" },
       {
         text: "Sil",
         style: "destructive",
@@ -200,16 +586,28 @@ export default function App() {
     ]);
   };
 
-  // ── AUTH ─────────────────────────────────────────────────────────────────
+  const testTarama = async (item) => {
+    try {
+      const { error } = await supabase.rpc("increment_scan_by_slug", {
+        target_slug: item.slug,
+      });
+      if (error) throw error;
+      fetchUserQrs(session.user.id);
+      Alert.alert("Test Basarili", `${item.title} icin sayac arttirildi!`);
+    } catch {
+      Alert.alert("Hata", "Sayac artirilamadi.");
+    }
+  };
+
   const handleAuth = async () => {
     if (!email || !password)
-      return Alert.alert("Hata", "Tüm alanları doldurun.");
+      return Alert.alert("Hata", "Tum alanlari doldurun.");
     setYukleniyor(true);
     try {
       if (isSignUp) {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
-        Alert.alert("Başarılı ✨", "Hesabınız oluşturuldu!");
+        Alert.alert("Basarili", "Hesabiniz olusturuldu!");
         setIsSignUp(false);
       } else {
         const { error } = await supabase.auth.signInWithPassword({
@@ -220,13 +618,12 @@ export default function App() {
         setAuthModalGorunur(false);
       }
     } catch (err) {
-      Alert.alert("Hata ⚠️", err.message);
+      Alert.alert("Hata", err.message);
     } finally {
       setYukleniyor(false);
     }
   };
 
-  // ── QR OLUŞTUR & KAYDET ──────────────────────────────────────────────────
   const qrOlustur = () => {
     if (!tempMetin.trim()) {
       Alert.alert("Hata", "URL giriniz.");
@@ -264,19 +661,21 @@ export default function App() {
       ]);
       if (error) throw error;
       setIsimModalGorunur(false);
-      Alert.alert("Başarılı ✨", "Dinamik QR koleksiyona eklendi!");
+      Alert.alert("Basarili", "Dinamik QR koleksiyona eklendi!");
       fetchUserQrs(session.user.id);
-    } catch {
-      Alert.alert("Hata", "Kaydedilemedi.");
+    } catch (err) {
+      Alert.alert(
+        "Hata",
+        err?.message || JSON.stringify(err) || "Kaydedilemedi.",
+      );
     }
   };
 
-  // ── LOGO ─────────────────────────────────────────────────────────────────
   const logoSec = async () => {
     if (isLocked) {
-      Alert.alert("Premium Özellik 🔒", "Logo için Plus plan gerekli.", [
-        { text: "Vazgeç", style: "cancel" },
-        { text: "Planları Gör", onPress: () => setPaketModalGorunur(true) },
+      Alert.alert("Premium Ozellik", "Logo icin Plus plan gerekli.", [
+        { text: "Vazgec", style: "cancel" },
+        { text: "Planlari Gor", onPress: () => setPaketModalGorunur(true) },
       ]);
       return;
     }
@@ -289,41 +688,65 @@ export default function App() {
     if (!sonuc.canceled) setSecilenLogo(sonuc.assets[0].uri);
   };
 
-  // ── İNDİRME ──────────────────────────────────────────────────────────────
   const galeriyeKaydet = async () => {
     try {
       const { status } = await MediaLibrary.requestPermissionsAsync(true);
-      if (status !== "granted") throw new Error("İzin yok");
+      if (status !== "granted") throw new Error("Izin yok");
       const yol = await captureRef(qrReferansi, { format: "png", quality: 1 });
       await MediaLibrary.saveToLibraryAsync(yol);
-      Alert.alert("Başarılı ✨", "PNG galeriye eklendi.");
+      Alert.alert("Basarili", "PNG galeriye eklendi.");
     } catch {
       Alert.alert("Hata", "Kaydedilemedi.");
     }
   };
 
+  const pngOlarakPaylas = async () => {
+    const uri = await captureRef(qrReferansi, { format: "png" });
+    await Sharing.shareAsync(uri, { mimeType: "image/png" });
+  };
+
   const svgOlarakPaylas = async () => {
     try {
-      if (!qrSvgRef.current) throw new Error("SVG ref yok");
-      qrSvgRef.current.toDataURL(async (data) => {
-        // data: base64 PNG — SVG string için ayrı bir yol gerekir
-        // Burada PNG'yi SVG wrapper içine sararak paylaşıyoruz
-        const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="300" height="300"><image href="data:image/png;base64,${data}" width="300" height="300"/></svg>`;
-        const fileUri = `${require("expo-file-system").documentDirectory}qr_code.svg`;
-        await require("expo-file-system").writeAsStringAsync(
-          fileUri,
-          svgContent,
-          {
-            encoding: require("expo-file-system").EncodingType.UTF8,
-          },
-        );
-        await Sharing.shareAsync(fileUri, {
-          mimeType: "image/svg+xml",
-          UTI: "public.svg-image",
-        });
+      const FileSystem = require("expo-file-system");
+      const base64 = await captureRef(qrReferansi, {
+        format: "png",
+        quality: 1,
+        result: "base64",
+      });
+      const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="800" height="800"><image href="data:image/png;base64,${base64}" width="800" height="800"/></svg>`;
+      const fileUri = FileSystem.documentDirectory + "articqr.svg";
+      await FileSystem.writeAsStringAsync(fileUri, svgContent, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      await Sharing.shareAsync(fileUri, {
+        mimeType: "image/svg+xml",
+        UTI: "public.svg-image",
       });
     } catch (e) {
-      Alert.alert("Hata", "SVG paylaşılamadı: " + e.message);
+      Alert.alert("Hata", "SVG paylasilamadi: " + e.message);
+    }
+  };
+
+  const svgOlarakIndir = async () => {
+    try {
+      const FileSystem = require("expo-file-system");
+      const base64 = await captureRef(qrReferansi, {
+        format: "png",
+        quality: 1,
+        result: "base64",
+      });
+      const svgContent = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="800" height="800"><image href="data:image/png;base64,${base64}" width="800" height="800"/></svg>`;
+      const fileUri = FileSystem.documentDirectory + "articqr.svg";
+      await FileSystem.writeAsStringAsync(fileUri, svgContent, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      await Sharing.shareAsync(fileUri, {
+        mimeType: "image/svg+xml",
+        UTI: "public.svg-image",
+        dialogTitle: "SVG olarak kaydet",
+      });
+    } catch (e) {
+      Alert.alert("Hata", "SVG indirilemedi: " + e.message);
     }
   };
 
@@ -334,10 +757,7 @@ export default function App() {
         quality: 1,
         result: "base64",
       });
-      const html = `
-        <html><body style="margin:0;display:flex;justify-content:center;align-items:center;height:100vh;background:#fff;">
-          <img src="data:image/png;base64,${uri}" style="width:300px;height:300px;"/>
-        </body></html>`;
+      const html = `<html><body style="margin:0;display:flex;justify-content:center;align-items:center;height:100vh;background:#fff;"><img src="data:image/png;base64,${uri}" style="width:300px;height:300px;" /></body></html>`;
       const { uri: pdfUri } = await Print.printToFileAsync({
         html,
         base64: false,
@@ -347,41 +767,59 @@ export default function App() {
         UTI: "com.adobe.pdf",
       });
     } catch (e) {
-      Alert.alert("Hata", "PDF oluşturulamadı: " + e.message);
+      Alert.alert("Hata", `PDF olusturulamadi: ${e.message}`);
     }
   };
 
-  const pngOlarakPaylas = async () => {
-    const uri = await captureRef(qrReferansi, { format: "png" });
-    Sharing.shareAsync(uri);
+  const pdfOlarakIndir = async () => {
+    try {
+      const uri = await captureRef(qrReferansi, {
+        format: "png",
+        quality: 1,
+        result: "base64",
+      });
+      const html = `<html><body style="margin:0;display:flex;justify-content:center;align-items:center;height:100vh;background:#fff;"><img src="data:image/png;base64,${uri}" style="width:300px;height:300px;" /></body></html>`;
+      const { uri: pdfUri } = await Print.printToFileAsync({
+        html,
+        base64: false,
+      });
+      await Sharing.shareAsync(pdfUri, {
+        mimeType: "application/pdf",
+        UTI: "com.adobe.pdf",
+        dialogTitle: "PDF olarak kaydet",
+      });
+    } catch (e) {
+      Alert.alert("Hata", `PDF indirilemedi: ${e.message}`);
+    }
   };
 
-  // ── RENK YARDIMCILARI ────────────────────────────────────────────────────
   const hexGecerliMi = (hex) => /^#[0-9A-Fa-f]{6}$/.test(hex);
 
   const anaRenkDegistir = (color) => {
     setQrRengi(color);
     setHexInput(color);
+    setPremiumPalet(null);
+    setIsGradient(false);
   };
-
   const hexInputOnayla = (val) => {
     const hex = val.startsWith("#") ? val : `#${val}`;
     setHexInput(hex);
-    if (hexGecerliMi(hex)) setQrRengi(hex);
+    if (hexGecerliMi(hex)) {
+      setQrRengi(hex);
+      setPremiumPalet(null);
+      setIsGradient(false);
+    }
   };
-
   const grad1Degistir = (color) => {
     setOzelGradyanRenk1(color);
     setHexGrad1(color);
     setPremiumPalet(null);
   };
-
   const grad2Degistir = (color) => {
     setOzelGradyanRenk2(color);
     setHexGrad2(color);
     setPremiumPalet(null);
   };
-
   const hexGrad1Onayla = (val) => {
     const hex = val.startsWith("#") ? val : `#${val}`;
     setHexGrad1(hex);
@@ -390,7 +828,6 @@ export default function App() {
       setPremiumPalet(null);
     }
   };
-
   const hexGrad2Onayla = (val) => {
     const hex = val.startsWith("#") ? val : `#${val}`;
     setHexGrad2(hex);
@@ -405,17 +842,35 @@ export default function App() {
     setIsGradient(false);
     setKenarYuvarlakligi(0);
     setSecilenYon(GRAD_DIRECTIONS[0]);
+    setSelectedPattern("square");
+    setSelectedEye("square");
     setOzelGradyanRenk1("#FF512F");
     setOzelGradyanRenk2("#DD2476");
     setHexGrad1("#FF512F");
     setHexGrad2("#DD2476");
+    setGradyanModu("full");
   };
 
-  // ── RENDER ───────────────────────────────────────────────────────────────
+  const patternSec = (item) => {
+    if (item.premium && isLocked) {
+      setPaketModalGorunur(true);
+      return;
+    }
+    setSelectedPattern(item.id);
+  };
+  const eyeSec = (item) => {
+    if (item.premium && isLocked) {
+      setPaketModalGorunur(true);
+      return;
+    }
+    setSelectedEye(item.id);
+  };
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.container}>
         <ScrollView
+          ref={scrollViewRef}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
         >
@@ -430,12 +885,12 @@ export default function App() {
                       `Plan: ${(userProfile?.plan_type || "free").toUpperCase()}\nEmail: ${session.user.email}`,
                       [
                         {
-                          text: "Çıkış Yap",
+                          text: "Cikis Yap",
+                          style: "destructive",
                           onPress: () => {
                             supabase.auth.signOut();
                             setUserProfile(null);
                           },
-                          style: "destructive",
                         },
                         { text: "Kapat" },
                       ],
@@ -443,13 +898,13 @@ export default function App() {
                   : (setIsSignUp(false), setAuthModalGorunur(true))
               }
             >
-              <Text style={{ fontSize: 22 }}>{session ? "👤" : "🔑"}</Text>
+              <Text style={styles.profileEmoji}>{session ? "👤" : "🔑"}</Text>
             </TouchableOpacity>
-            <View style={{ alignItems: "center" }}>
+            <View style={styles.brandCenter}>
               <Text style={styles.brandName}>ArticQR</Text>
-              <Text style={styles.tagline}>Hızlı, Şık ve Dinamik QR</Text>
+              <Text style={styles.tagline}>Hizli, Sik ve Dinamik QR</Text>
             </View>
-            <View style={{ width: 40 }} />
+            <View style={styles.headerSpacer} />
           </View>
 
           {/* QR PREVIEW */}
@@ -459,24 +914,17 @@ export default function App() {
               collapsable={false}
               style={[styles.qrShadowBox, { borderRadius: kenarYuvarlakligi }]}
             >
-              <QRCode
+              <StyledQRCode
                 value={metin}
                 size={width * 0.55}
-                color={premiumPalet ? premiumPalet[0] : qrRengi}
-                backgroundColor="white"
-                logo={secilenLogo ? { uri: secilenLogo } : null}
-                logoSize={60}
-                logoBackgroundColor="white"
-                logoBorderRadius={12}
-                quietZone={10}
-                enableLinearGradient={gradyanAktif}
-                linearGradient={
-                  gradyanAktif ? [activeGrad1, activeGrad2] : [qrRengi, qrRengi]
-                }
-                gradientDirection={gradDir}
-                getRef={(c) => {
-                  qrSvgRef.current = c;
-                }}
+                solidColor={premiumPalet ? premiumPalet[0] : qrRengi}
+                isGradient={gradyanAktif}
+                gradColors={[activeGrad1, activeGrad2]}
+                gradDir={gradDir}
+                gradyanModu={gradyanModu}
+                logoUri={secilenLogo}
+                pattern={selectedPattern}
+                eyeStyle={selectedEye}
               />
             </View>
             {isLocked && (
@@ -485,7 +933,7 @@ export default function App() {
                 onPress={() => setPaketModalGorunur(true)}
               >
                 <Text style={styles.promoText}>
-                  💡 Logo ve Dinamik QR için Plus plana geç.
+                  Logo, ozel desenler ve ozel gozler icin Plus plana gec.
                 </Text>
               </TouchableOpacity>
             )}
@@ -501,35 +949,100 @@ export default function App() {
               <Text style={styles.actionText}>Renk</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.mainAction, isLocked && { opacity: 0.7 }]}
+              style={[styles.mainAction, isLocked && styles.dimmed]}
               onPress={logoSec}
             >
-              <Text style={styles.actionEmoji}>✨{isLocked ? "🔒" : ""}</Text>
+              <Text style={styles.actionEmoji}>{isLocked ? "✨🔒" : "✨"}</Text>
               <Text style={styles.actionText}>Logo</Text>
             </TouchableOpacity>
           </View>
 
-          {/* PREMIUM TASARIM PANELİ */}
+          {/* DESEN & GOZLER */}
+          <View style={styles.designSection}>
+            <Text style={styles.sectionLabel}>DESEN</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.selectorRow}
+            >
+              {QR_PATTERNS.map((item) => {
+                const active = selectedPattern === item.id;
+                return (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[
+                      styles.selectorCard,
+                      active && styles.selectorCardActive,
+                    ]}
+                    onPress={() => patternSec(item)}
+                  >
+                    <MiniPatternPreview pattern={item.id} active={active} />
+                    <Text
+                      style={[
+                        styles.selectorLabel,
+                        active && styles.selectorLabelActive,
+                      ]}
+                    >
+                      {item.label}
+                    </Text>
+                    {item.premium && isLocked && (
+                      <Text style={styles.lockMini}>🔒</Text>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+
+            <Text style={[styles.sectionLabel, styles.sectionLabelTopSpacing]}>
+              GOZLER
+            </Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.selectorRow}
+            >
+              {QR_EYES.map((item) => {
+                const active = selectedEye === item.id;
+                return (
+                  <TouchableOpacity
+                    key={item.id}
+                    style={[
+                      styles.selectorCard,
+                      active && styles.selectorCardActive,
+                    ]}
+                    onPress={() => eyeSec(item)}
+                  >
+                    <MiniEyePreview eyeStyle={item.id} active={active} />
+                    <Text
+                      style={[
+                        styles.selectorLabel,
+                        active && styles.selectorLabelActive,
+                      ]}
+                    >
+                      {item.label}
+                    </Text>
+                    {item.premium && isLocked && (
+                      <Text style={styles.lockMini}>🔒</Text>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+
+          {/* PREMIUM TASARIM */}
           <View style={styles.designSection}>
             <Text style={styles.sectionLabel}>
-              PREMIUM TASARIM {isLocked ? "🔒" : ""}
+              {isLocked ? "PREMIUM TASARIM 🔒" : "PREMIUM TASARIM"}
             </Text>
 
-            {/* Gradyan toggle + özel renk */}
-            <View
-              style={{
-                flexDirection: "row",
-                alignItems: "center",
-                gap: 10,
-                marginBottom: 8,
-              }}
-            >
+            <View style={styles.gradientToggleRow}>
               <TouchableOpacity
                 style={[
                   styles.styleBtn,
+                  styles.flexOne,
                   isGradient && !isLocked && styles.activeBtn,
-                  { flex: 1 },
-                  isLocked && { opacity: 0.5 },
+                  isLocked && styles.dimmed,
                 ]}
                 onPress={() =>
                   isLocked
@@ -537,106 +1050,102 @@ export default function App() {
                     : setIsGradient(!isGradient)
                 }
               >
-                <Text>
-                  🌈 Gradyan{isLocked ? " 🔒" : isGradient ? " ✓" : ""}
+                <Text style={styles.styleBtnText}>
+                  {isLocked
+                    ? "🌈 Gradyan 🔒"
+                    : isGradient
+                      ? "🌈 Gradyan ✓"
+                      : "🌈 Gradyan"}
                 </Text>
               </TouchableOpacity>
-
               {isGradient && !isLocked && (
                 <TouchableOpacity
                   style={[
                     styles.styleBtn,
-                    {
-                      flex: 1,
-                      borderColor: "#007AFF",
-                      backgroundColor: "#E8F2FF",
-                    },
+                    styles.flexOne,
+                    styles.gradientEditBtn,
                   ]}
                   onPress={() => setGradyanModalGorunur(true)}
                 >
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: 6,
-                    }}
-                  >
+                  <View style={styles.gradientEditInner}>
                     <View
                       style={[
                         styles.miniColorDot,
                         { backgroundColor: activeGrad1 },
                       ]}
                     />
-                    <Text style={{ fontSize: 12, fontWeight: "700" }}>→</Text>
+                    <Text style={styles.arrowText}>→</Text>
                     <View
                       style={[
                         styles.miniColorDot,
                         { backgroundColor: activeGrad2 },
                       ]}
                     />
-                    <Text
-                      style={{
-                        fontSize: 11,
-                        color: "#007AFF",
-                        fontWeight: "700",
-                      }}
-                    >
-                      Düzenle
-                    </Text>
+                    <Text style={styles.gradientEditText}>Duzenle</Text>
                   </View>
                 </TouchableOpacity>
               )}
             </View>
 
-            {/* Gradyan Yönü — sadece gradyan aktifken göster */}
             {isGradient && !isLocked && (
-              <View style={{ marginBottom: 12 }}>
-                <Text
-                  style={[
-                    styles.sectionLabel,
-                    { marginBottom: 8, fontSize: 11 },
-                  ]}
-                >
-                  GRADYAN YÖNÜ
-                </Text>
-                <View style={{ flexDirection: "row", gap: 8 }}>
+              <View style={styles.gradientDirectionWrap}>
+                <Text style={styles.sectionLabelSmall}>GRADYAN YONU</Text>
+                <View style={styles.gradientDirectionsRow}>
                   {GRAD_DIRECTIONS.map((y) => (
                     <TouchableOpacity
                       key={y.id}
                       style={[
                         styles.styleBtn,
-                        { flex: 1, paddingVertical: 10 },
+                        styles.flexOne,
+                        styles.directionBtn,
                         secilenYon.id === y.id && styles.activeBtn,
                       ]}
                       onPress={() => setSecilenYon(y)}
                     >
-                      <Text style={{ fontSize: 18 }}>{y.emoji}</Text>
-                      <Text
-                        style={{
-                          fontSize: 11,
-                          fontWeight: "700",
-                          marginTop: 2,
-                        }}
-                      >
-                        {y.label}
-                      </Text>
+                      <Text style={styles.directionEmoji}>{y.emoji}</Text>
+                      <Text style={styles.directionLabel}>{y.label}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
               </View>
             )}
 
-            {/* Köşe toggle */}
+            {isGradient && !isLocked && (
+              <View style={{ marginBottom: 12 }}>
+                <Text style={styles.sectionLabelSmall}>GRADYAN MODU</Text>
+                <View style={{ flexDirection: "row", gap: 8 }}>
+                  <TouchableOpacity
+                    style={[
+                      styles.styleBtn,
+                      styles.flexOne,
+                      gradyanModu === "full" && styles.activeBtn,
+                    ]}
+                    onPress={() => setGradyanModu("full")}
+                  >
+                    <Text style={{ fontSize: 16 }}>🌅</Text>
+                    <Text style={styles.directionLabel}>Tam QR</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[
+                      styles.styleBtn,
+                      styles.flexOne,
+                      gradyanModu === "module" && styles.activeBtn,
+                    ]}
+                    onPress={() => setGradyanModu("module")}
+                  >
+                    <Text style={{ fontSize: 16 }}>⬛</Text>
+                    <Text style={styles.directionLabel}>Kare Kare</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+
             <TouchableOpacity
               style={[
                 styles.styleBtn,
-                {
-                  marginBottom: 12,
-                  alignSelf: "flex-start",
-                  paddingHorizontal: 18,
-                },
+                styles.cornerBtn,
                 kenarYuvarlakligi > 0 && !isLocked && styles.activeBtn,
-                isLocked && { opacity: 0.5 },
+                isLocked && styles.dimmed,
               ]}
               onPress={() =>
                 isLocked
@@ -644,15 +1153,14 @@ export default function App() {
                   : setKenarYuvarlakligi(kenarYuvarlakligi === 0 ? 30 : 0)
               }
             >
-              <Text>
+              <Text style={styles.styleBtnText}>
                 {kenarYuvarlakligi > 0
-                  ? "🔵 Köşe: Yuvarlatılmış"
-                  : "⬛ Köşe: Kare"}
+                  ? "🔵 Kose: Yuvarlatilmis"
+                  : "⬛ Kose: Kare"}
                 {isLocked ? " 🔒" : ""}
               </Text>
             </TouchableOpacity>
 
-            {/* Premium Renk Paletleri */}
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               {PREMIUM_PALETTES.map((p) => (
                 <TouchableOpacity
@@ -666,7 +1174,10 @@ export default function App() {
                     },
                   ]}
                   onPress={() => {
-                    if (isLocked) return setPaketModalGorunur(true);
+                    if (isLocked) {
+                      setPaketModalGorunur(true);
+                      return;
+                    }
                     setPremiumPalet(p.colors);
                     setIsGradient(true);
                   }}
@@ -686,12 +1197,12 @@ export default function App() {
                 </TouchableOpacity>
               ))}
               <TouchableOpacity style={styles.resetBtn} onPress={sifirlaDesign}>
-                <Text style={{ fontSize: 12, color: "#888" }}>↺ Sıfırla</Text>
+                <Text style={styles.resetText}>↺ Sifirla</Text>
               </TouchableOpacity>
             </ScrollView>
           </View>
 
-          {/* INPUT AREA */}
+          {/* URL INPUT */}
           <View style={styles.inputArea}>
             <View style={styles.inputWrapper}>
               <TextInput
@@ -703,20 +1214,23 @@ export default function App() {
               />
             </View>
             <TouchableOpacity
-              style={[styles.dynamicButton, { backgroundColor: "#000" }]}
+              style={[styles.dynamicButton, styles.darkButton]}
               onPress={qrOlustur}
             >
-              <Text style={[styles.dynamicButtonText, { color: "#FFF" }]}>
-                QR KODU OLUŞTUR
+              <Text style={[styles.dynamicButtonText, styles.lightText]}>
+                QR KODU OLUSTUR
               </Text>
             </TouchableOpacity>
-            {isLocked && (
+            {!session && (
               <TouchableOpacity
-                style={styles.dynamicButton}
+                style={[
+                  styles.dynamicButton,
+                  { backgroundColor: "#FFCC00", marginBottom: 10 },
+                ]}
                 onPress={() => setPaketModalGorunur(true)}
               >
                 <Text style={styles.dynamicButtonText}>
-                  ⚡ DİNAMİK QR'A YÜKSELT
+                  DINAMIK QR'A YUKSELT
                 </Text>
               </TouchableOpacity>
             )}
@@ -724,12 +1238,12 @@ export default function App() {
               <TouchableOpacity
                 style={[
                   styles.dynamicButton,
-                  { backgroundColor: "#34C759", marginBottom: 20 },
+                  { backgroundColor: "#34C759", marginBottom: 10 },
                 ]}
                 onPress={qrKaydet}
               >
-                <Text style={styles.dynamicButtonText}>
-                  📁 DİNAMİK QR OLUŞTUR VE KAYDET
+                <Text style={[styles.dynamicButtonText, styles.lightText]}>
+                  DINAMIK QR OLUSTUR VE KAYDET
                 </Text>
               </TouchableOpacity>
             )}
@@ -738,40 +1252,37 @@ export default function App() {
                 style={styles.secondaryButton}
                 onPress={() => setIndirModalGorunur(true)}
               >
-                <Text style={styles.secondaryButtonText}>💾 İndir</Text>
+                <Text style={styles.secondaryButtonText}>💾 Indir</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={styles.secondaryButton}
-                onPress={pngOlarakPaylas}
+                onPress={() => setPaylasModalGorunur(true)}
               >
-                <Text style={styles.secondaryButtonText}>📤 Paylaş</Text>
+                <Text style={styles.secondaryButtonText}>📤 Paylas</Text>
               </TouchableOpacity>
             </View>
           </View>
 
-          {/* KOLEKSİYON LİSTESİ */}
+          {/* KOLEKSIYON */}
           {session && (
             <View style={styles.dashboardContainer}>
               <View style={styles.dashboardHeaderRow}>
                 <Text style={styles.dashboardTitle}>Koleksiyonum</Text>
                 <TouchableOpacity onPress={() => fetchUserQrs(session.user.id)}>
-                  <Text style={{ color: "#007AFF" }}>Yenile ↻</Text>
+                  <Text style={styles.refreshText}>Yenile ↻</Text>
                 </TouchableOpacity>
               </View>
               {userQrs.length === 0 ? (
                 <View style={styles.emptyState}>
-                  <Text style={{ color: "#888" }}>
-                    Henüz bir QR kod kaydetmedin.
+                  <Text style={styles.emptyStateText}>
+                    Henuz bir QR kod kaydetmedin.
                   </Text>
                 </View>
               ) : (
                 userQrs.map((item) => (
                   <View key={item.id} style={styles.qrItemCard}>
-                    <View style={{ flex: 1 }}>
-                      <Text
-                        style={{ fontWeight: "bold", fontSize: 15 }}
-                        numberOfLines={1}
-                      >
+                    <View style={styles.qrItemLeft}>
+                      <Text style={styles.qrItemTitle} numberOfLines={1}>
                         {item.title}
                       </Text>
                       <View style={styles.scanBadge}>
@@ -780,65 +1291,39 @@ export default function App() {
                         </Text>
                       </View>
                     </View>
-                    <View style={{ flexDirection: "row" }}>
+                    <View style={{ flexDirection: "row", gap: 6 }}>
                       <TouchableOpacity
                         style={styles.editBtn}
                         onPress={() => {
-                          setTempMetin(item.target_url);
+                          setTempMetin(
+                            item.target_url || "https://articqr.studio",
+                          );
                           setMetin(
                             `https://slwtvoyymwyakklinjvr.supabase.co/functions/v1/redirect?s=${item.slug}`,
                           );
                           setQrRengi(item.qr_color || "#000000");
                           setHexInput(item.qr_color || "#000000");
+                          setSelectedPattern(item.pattern_type || "square");
+                          setSelectedEye(item.eye_type || "square");
                           Alert.alert(
-                            "Yüklendi",
-                            "Düzenleme için yukarı aktarıldı.",
+                            "Yuklendi",
+                            "Duzenleme icin yukari aktarildi.",
                           );
                         }}
                       >
-                        <Text
-                          style={{
-                            color: "#FFF",
-                            fontWeight: "bold",
-                            fontSize: 12,
-                          }}
-                        >
-                          Düzenle
-                        </Text>
+                        <Text style={styles.editBtnText}>Duzenle</Text>
                       </TouchableOpacity>
                       <TouchableOpacity
-                        style={[
-                          styles.editBtn,
-                          { backgroundColor: "#34C759", marginLeft: 5 },
-                        ]}
+                        style={[styles.editBtn, { backgroundColor: "#34C759" }]}
                         onPress={() => testTarama(item)}
                       >
-                        <Text
-                          style={{
-                            color: "#FFF",
-                            fontWeight: "bold",
-                            fontSize: 12,
-                          }}
-                        >
-                          Test Et
-                        </Text>
+                        <Text style={styles.editBtnText}>Test Et</Text>
                       </TouchableOpacity>
                       <TouchableOpacity
-                        style={[
-                          styles.editBtn,
-                          { backgroundColor: "#FF3B30", marginLeft: 5 },
-                        ]}
+                        style={[styles.editBtn, { backgroundColor: "#FF3B30" }]}
                         onPress={() => qrSil(item)}
                       >
-                        <Text
-                          style={{
-                            color: "#FFF",
-                            fontWeight: "bold",
-                            fontSize: 12,
-                          }}
-                        >
-                          Sil
-                        </Text>
+                        <Text style={styles.editBtnText}>Sil</Text>
                       </TouchableOpacity>
                     </View>
                   </View>
@@ -846,8 +1331,6 @@ export default function App() {
               )}
             </View>
           )}
-
-          {/* ═══════════════════ MODALLAR ═══════════════════ */}
 
           {/* RENK MODAL */}
           <Modal
@@ -864,7 +1347,7 @@ export default function App() {
               >
                 <View style={[styles.dragHandle, { marginTop: 14 }]} />
                 <Text style={[styles.sheetTitle, { paddingHorizontal: 24 }]}>
-                  Renk Seçimi
+                  Renk Secimi
                 </Text>
                 <ScrollView
                   style={{ width: "100%" }}
@@ -884,7 +1367,6 @@ export default function App() {
                       noSnap
                     />
                   </View>
-                  {/* Hex Input — picker'ın altında, swatchların altında */}
                   <View
                     style={[styles.hexRow, { marginTop: 16, marginBottom: 8 }]}
                   >
@@ -904,7 +1386,7 @@ export default function App() {
                 <TouchableOpacity
                   style={[
                     styles.closeSheet,
-                    { marginHorizontal: 24, marginBottom: 24, width: 240 },
+                    { marginHorizontal: 24, marginBottom: 24, width: "auto" },
                   ]}
                   onPress={() => setRenkModalGorunur(false)}
                 >
@@ -914,7 +1396,7 @@ export default function App() {
             </View>
           </Modal>
 
-          {/* GRADYAN RENK MODAL */}
+          {/* GRADYAN MODAL */}
           <Modal
             visible={gradyanModalGorunur}
             animationType="slide"
@@ -931,8 +1413,6 @@ export default function App() {
                 <Text style={[styles.sheetTitle, { paddingHorizontal: 24 }]}>
                   Gradyan Renkleri
                 </Text>
-
-                {/* Slot seçimi — scroll dışında sabit */}
                 <View
                   style={{
                     flexDirection: "row",
@@ -966,7 +1446,7 @@ export default function App() {
                         aktifGradyanSlot === 1 && { color: "#FFF" },
                       ]}
                     >
-                      Başlangıç
+                      Baslangic
                     </Text>
                   </TouchableOpacity>
                   <TouchableOpacity
@@ -993,11 +1473,10 @@ export default function App() {
                         aktifGradyanSlot === 2 && { color: "#FFF" },
                       ]}
                     >
-                      Bitiş
+                      Bitis
                     </Text>
                   </TouchableOpacity>
                 </View>
-
                 <ScrollView
                   style={{ width: "100%" }}
                   contentContainerStyle={{
@@ -1007,7 +1486,6 @@ export default function App() {
                   showsVerticalScrollIndicator={false}
                   keyboardShouldPersistTaps="handled"
                 >
-                  {/* Color Picker */}
                   <View style={{ height: 300 }}>
                     <ColorPicker
                       color={
@@ -1023,8 +1501,6 @@ export default function App() {
                       noSnap
                     />
                   </View>
-
-                  {/* Hex Input */}
                   <View
                     style={[styles.hexRow, { marginTop: 16, marginBottom: 8 }]}
                   >
@@ -1051,124 +1527,14 @@ export default function App() {
                     />
                   </View>
                 </ScrollView>
-
                 <TouchableOpacity
                   style={[
                     styles.closeSheet,
-                    { marginHorizontal: 24, marginBottom: 24, width: 240 },
+                    { marginHorizontal: 24, marginBottom: 24, width: "auto" },
                   ]}
                   onPress={() => setGradyanModalGorunur(false)}
                 >
                   <Text style={styles.closeSheetText}>TAMAM</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </Modal>
-
-          {/* İNDİR MODAL */}
-          <Modal
-            visible={indirModalGorunur}
-            animationType="fade"
-            transparent={true}
-          >
-            <View style={styles.blurOverlay}>
-              <View style={styles.authCard}>
-                <Text style={styles.authTitle}>İndir / Paylaş</Text>
-
-                <TouchableOpacity
-                  style={[styles.downloadBtn, { backgroundColor: "#000" }]}
-                  onPress={async () => {
-                    setIndirModalGorunur(false);
-                    await galeriyeKaydet();
-                  }}
-                >
-                  <Text style={styles.downloadBtnText}>
-                    🖼️ PNG olarak kaydet
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[
-                    styles.downloadBtn,
-                    { backgroundColor: "#FF3B30" },
-                    isLocked && { opacity: 0.5 },
-                  ]}
-                  onPress={async () => {
-                    if (isLocked) {
-                      setIndirModalGorunur(false);
-                      setPaketModalGorunur(true);
-                      return;
-                    }
-                    setIndirModalGorunur(false);
-                    await pdfOlarakPaylas();
-                  }}
-                >
-                  <Text style={styles.downloadBtnText}>
-                    📄 PDF olarak paylaş{isLocked ? " 🔒" : ""}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[
-                    styles.downloadBtn,
-                    { backgroundColor: "#007AFF" },
-                    isLocked && { opacity: 0.5 },
-                  ]}
-                  onPress={async () => {
-                    if (isLocked) {
-                      setIndirModalGorunur(false);
-                      setPaketModalGorunur(true);
-                      return;
-                    }
-                    setIndirModalGorunur(false);
-                    await svgOlarakPaylas();
-                  }}
-                >
-                  <Text style={styles.downloadBtnText}>
-                    🔷 SVG olarak paylaş{isLocked ? " 🔒" : ""}
-                  </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  onPress={() => setIndirModalGorunur(false)}
-                  style={{ marginTop: 15 }}
-                >
-                  <Text style={{ color: "#888" }}>Vazgeç</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-          </Modal>
-
-          {/* İSİM MODAL */}
-          <Modal
-            visible={isimModalGorunur}
-            animationType="fade"
-            transparent={true}
-          >
-            <View style={styles.blurOverlay}>
-              <View style={styles.authCard}>
-                <Text style={styles.authTitle}>QR Koda İsim Ver</Text>
-                <TextInput
-                  style={styles.authInput}
-                  placeholder="Örn: Instagram QR..."
-                  value={qrIsmi}
-                  onChangeText={setQrIsmi}
-                  autoFocus
-                  maxLength={40}
-                />
-                <TouchableOpacity
-                  style={styles.authMainBtn}
-                  onPress={qrKaydetOnayla}
-                >
-                  <Text style={{ color: "#FFF", fontWeight: "bold" }}>
-                    💾 KAYDET
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => setIsimModalGorunur(false)}
-                  style={{ marginTop: 15 }}
-                >
-                  <Text style={{ color: "#888" }}>Vazgeç</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1183,7 +1549,7 @@ export default function App() {
             <View style={styles.blurOverlay}>
               <View style={styles.authCard}>
                 <Text style={styles.authTitle}>
-                  {isSignUp ? "Hesap Oluştur" : "Giriş Yap"}
+                  {isSignUp ? "Hesap Olustur" : "Giris Yap"}
                 </Text>
                 <TextInput
                   style={styles.authInput}
@@ -1194,7 +1560,7 @@ export default function App() {
                 />
                 <TextInput
                   style={styles.authInput}
-                  placeholder="Şifre"
+                  placeholder="Sifre"
                   value={password}
                   onChangeText={setPassword}
                   secureTextEntry
@@ -1207,7 +1573,7 @@ export default function App() {
                     <ActivityIndicator color="#FFF" />
                   ) : (
                     <Text style={{ color: "#FFF", fontWeight: "bold" }}>
-                      {isSignUp ? "Kayıt Ol" : "Giriş Yap"}
+                      {isSignUp ? "Kayit Ol" : "Giris Yap"}
                     </Text>
                   )}
                 </TouchableOpacity>
@@ -1216,14 +1582,261 @@ export default function App() {
                   style={{ marginTop: 15 }}
                 >
                   <Text style={{ color: "#007AFF" }}>
-                    {isSignUp ? "Giriş Yap" : "Kayıt Ol"}
+                    {isSignUp
+                      ? "Zaten hesabin var mi? Giris Yap"
+                      : "Hesabin yok mu? Kayit Ol"}
                   </Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={() => setAuthModalGorunur(false)}
+                  style={{ marginTop: 12 }}
+                >
+                  <Text style={{ color: "#888" }}>Vazgec</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+
+          {/* ISIM MODAL */}
+          <Modal
+            visible={isimModalGorunur}
+            animationType="fade"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View style={styles.authCard}>
+                <Text style={styles.authTitle}>QR Koda Isim Ver</Text>
+                <TextInput
+                  style={styles.authInput}
+                  placeholder="Orn: Instagram QR..."
+                  value={qrIsmi}
+                  onChangeText={setQrIsmi}
+                  autoFocus
+                  maxLength={40}
+                />
+                <TouchableOpacity
+                  style={styles.authMainBtn}
+                  onPress={qrKaydetOnayla}
+                >
+                  <Text style={{ color: "#FFF", fontWeight: "bold" }}>
+                    KAYDET
+                  </Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => setIsimModalGorunur(false)}
                   style={{ marginTop: 15 }}
                 >
-                  <Text style={{ color: "#888" }}>Vazgeç</Text>
+                  <Text style={{ color: "#888" }}>Vazgec</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+
+          {/* INDIR MODAL */}
+          <Modal
+            visible={indirModalGorunur}
+            animationType="fade"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View style={styles.authCard}>
+                <Text style={styles.authTitle}>Indir</Text>
+                <TouchableOpacity
+                  style={[styles.downloadBtn, { backgroundColor: "#1C1C1E" }]}
+                  onPress={async () => {
+                    setIndirModalGorunur(false);
+                    await galeriyeKaydet();
+                  }}
+                >
+                  <Text style={styles.downloadBtnText}>PNG olarak indir</Text>
+                </TouchableOpacity>
+                {isLocked ? (
+                  <View
+                    style={[
+                      styles.downloadBtn,
+                      {
+                        backgroundColor: "#F2F2F7",
+                        borderWidth: 1.5,
+                        borderColor: "#E5E5EA",
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={{ fontWeight: "800", color: "#111", fontSize: 14 }}
+                    >
+                      Profesyonel SVG indir
+                    </Text>
+                    <Text style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+                      Plus plan ile acilir
+                    </Text>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.downloadBtn, { backgroundColor: "#007AFF" }]}
+                    onPress={async () => {
+                      setIndirModalGorunur(false);
+                      await svgOlarakIndir();
+                    }}
+                  >
+                    <Text style={styles.downloadBtnText}>SVG olarak indir</Text>
+                  </TouchableOpacity>
+                )}
+                {isLocked ? (
+                  <View
+                    style={[
+                      styles.downloadBtn,
+                      {
+                        backgroundColor: "#F2F2F7",
+                        borderWidth: 1.5,
+                        borderColor: "#E5E5EA",
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={{ fontWeight: "800", color: "#111", fontSize: 14 }}
+                    >
+                      Profesyonel PDF indir
+                    </Text>
+                    <Text style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+                      Plus plan ile acilir
+                    </Text>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.downloadBtn, { backgroundColor: "#FF3B30" }]}
+                    onPress={async () => {
+                      setIndirModalGorunur(false);
+                      await pdfOlarakIndir();
+                    }}
+                  >
+                    <Text style={styles.downloadBtnText}>PDF olarak indir</Text>
+                  </TouchableOpacity>
+                )}
+                {isLocked && (
+                  <TouchableOpacity
+                    style={{ marginBottom: 6 }}
+                    onPress={() => {
+                      setIndirModalGorunur(false);
+                      setPaketModalGorunur(true);
+                    }}
+                  >
+                    <Text style={{ color: "#007AFF", fontWeight: "700" }}>
+                      Plus plana gec →
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity
+                  onPress={() => setIndirModalGorunur(false)}
+                  style={{ marginTop: 8 }}
+                >
+                  <Text style={{ color: "#888" }}>Vazgec</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
+
+          {/* PAYLAS MODAL */}
+          <Modal
+            visible={paylasModalGorunur}
+            animationType="fade"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View style={styles.authCard}>
+                <Text style={styles.authTitle}>Paylas</Text>
+                <TouchableOpacity
+                  style={[styles.downloadBtn, { backgroundColor: "#1C1C1E" }]}
+                  onPress={async () => {
+                    setPaylasModalGorunur(false);
+                    await pngOlarakPaylas();
+                  }}
+                >
+                  <Text style={styles.downloadBtnText}>PNG olarak paylas</Text>
+                </TouchableOpacity>
+                {isLocked ? (
+                  <View
+                    style={[
+                      styles.downloadBtn,
+                      {
+                        backgroundColor: "#F2F2F7",
+                        borderWidth: 1.5,
+                        borderColor: "#E5E5EA",
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={{ fontWeight: "800", color: "#111", fontSize: 14 }}
+                    >
+                      Profesyonel SVG paylas
+                    </Text>
+                    <Text style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+                      Plus plan ile acilir
+                    </Text>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.downloadBtn, { backgroundColor: "#007AFF" }]}
+                    onPress={async () => {
+                      setPaylasModalGorunur(false);
+                      await svgOlarakPaylas();
+                    }}
+                  >
+                    <Text style={styles.downloadBtnText}>
+                      SVG olarak paylas
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {isLocked ? (
+                  <View
+                    style={[
+                      styles.downloadBtn,
+                      {
+                        backgroundColor: "#F2F2F7",
+                        borderWidth: 1.5,
+                        borderColor: "#E5E5EA",
+                      },
+                    ]}
+                  >
+                    <Text
+                      style={{ fontWeight: "800", color: "#111", fontSize: 14 }}
+                    >
+                      Profesyonel PDF paylas
+                    </Text>
+                    <Text style={{ fontSize: 12, color: "#888", marginTop: 3 }}>
+                      Plus plan ile acilir
+                    </Text>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={[styles.downloadBtn, { backgroundColor: "#FF3B30" }]}
+                    onPress={async () => {
+                      setPaylasModalGorunur(false);
+                      await pdfOlarakPaylas();
+                    }}
+                  >
+                    <Text style={styles.downloadBtnText}>
+                      PDF olarak paylas
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {isLocked && (
+                  <TouchableOpacity
+                    style={{ marginBottom: 6 }}
+                    onPress={() => {
+                      setPaylasModalGorunur(false);
+                      setPaketModalGorunur(true);
+                    }}
+                  >
+                    <Text style={{ color: "#007AFF", fontWeight: "700" }}>
+                      Plus plana gec →
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                <TouchableOpacity
+                  onPress={() => setPaylasModalGorunur(false)}
+                  style={{ marginTop: 8 }}
+                >
+                  <Text style={{ color: "#888" }}>Vazgec</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -1240,7 +1853,7 @@ export default function App() {
               </TouchableOpacity>
               <ScrollView contentContainerStyle={{ padding: 20 }}>
                 <Text style={styles.paywallTitle}>
-                  Planını Seç, Markanı Büyüt 🚀
+                  Planini Sec, Markani Buyut 🚀
                 </Text>
                 {[
                   {
@@ -1248,8 +1861,9 @@ export default function App() {
                     price: "$4.99/ay",
                     features: [
                       "• 5 Adet Dinamik QR",
-                      "• Özel Logo Ekleme",
-                      "• PDF & SVG Çıktı",
+                      "• Ozel Logo Ekleme",
+                      "• PDF & SVG Cikti",
+                      "• Premium Desenler",
                     ],
                     highlight: false,
                   },
@@ -1258,8 +1872,8 @@ export default function App() {
                     price: "$9.99/ay",
                     features: [
                       "• 25 Adet Dinamik QR",
-                      "• Sıfır Reklam",
-                      "• Vektörel Çıktı",
+                      "• Tum Premium Ozellikler",
+                      "• Vektorel Cikti",
                     ],
                     highlight: true,
                   },
@@ -1268,8 +1882,8 @@ export default function App() {
                     price: "$39.00/ay",
                     features: [
                       "• 200 Adet Dinamik QR",
-                      "• Müşteri Klasörleme",
-                      "• Ekip Paylaşımı",
+                      "• Musteri Klasorleme",
+                      "• Ekip Paylasimi",
                     ],
                     highlight: false,
                   },
@@ -1305,7 +1919,7 @@ export default function App() {
                       }}
                     >
                       <Text style={styles.planButtonText}>
-                        {session ? "PLANA GEÇ" : "KAYIT OL VE SEÇ"}
+                        {session ? "PLANA GEC" : "KAYIT OL VE SEC"}
                       </Text>
                     </TouchableOpacity>
                   </View>
@@ -1319,179 +1933,250 @@ export default function App() {
   );
 }
 
-// ── STİLLER ──────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#FFFFFF" },
-  scrollContent: { paddingBottom: 60 },
+  container: { flex: 1, backgroundColor: "#F7F8FA" },
+  scrollContent: { paddingBottom: 36 },
   headerContainer: {
     flexDirection: "row",
-    justifyContent: "space-between",
     alignItems: "center",
-    marginTop: 20,
+    justifyContent: "space-between",
     paddingHorizontal: 20,
+    paddingTop: 10,
+    paddingBottom: 8,
   },
-  profileBtn: { width: 40, height: 40, justifyContent: "center" },
-  brandName: { fontSize: 32, fontWeight: "900", color: "#000" },
-  tagline: { fontSize: 14, color: "#888" },
-  previewCard: { alignItems: "center", marginVertical: 30 },
-  qrShadowBox: {
-    padding: 18,
+  profileBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: "#FFF",
-    elevation: 15,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  profileEmoji: { fontSize: 22 },
+  brandCenter: { alignItems: "center" },
+  headerSpacer: { width: 40 },
+  brandName: { fontSize: 26, fontWeight: "800", color: "#111" },
+  tagline: { marginTop: 2, fontSize: 12, color: "#7A7A7A" },
+  previewCard: {
+    marginHorizontal: 20,
+    marginTop: 16,
+    backgroundColor: "#FFF",
+    borderRadius: 28,
+    padding: 18,
+    alignItems: "center",
+  },
+  qrShadowBox: {
+    backgroundColor: "#FFF",
+    padding: 18,
+    borderRadius: 22,
     shadowColor: "#000",
-    shadowOpacity: 0.12,
-    shadowRadius: 25,
-    overflow: "hidden",
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 4,
   },
   promoBadge: {
-    marginTop: 15,
-    backgroundColor: "#F2F2F7",
-    paddingHorizontal: 15,
-    paddingVertical: 8,
-    borderRadius: 12,
+    marginTop: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    backgroundColor: "#F3F7FF",
+    borderRadius: 14,
   },
-  promoText: { fontSize: 12, color: "#007AFF", fontWeight: "600" },
+  promoText: {
+    color: "#275EFE",
+    fontWeight: "600",
+    fontSize: 13,
+    textAlign: "center",
+  },
   modernToolbar: {
     flexDirection: "row",
-    justifyContent: "center",
     gap: 12,
-    marginBottom: 15,
+    marginHorizontal: 20,
+    marginTop: 16,
   },
   mainAction: {
-    backgroundColor: "#F2F2F7",
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 20,
+    flex: 1,
+    backgroundColor: "#FFF",
+    borderRadius: 18,
+    paddingVertical: 16,
     alignItems: "center",
-    width: width * 0.28,
+    justifyContent: "center",
   },
-  colorDot: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    marginBottom: 4,
-    borderWidth: 1,
-    borderColor: "#DDD",
+  dimmed: { opacity: 0.6 },
+  colorDot: { width: 22, height: 22, borderRadius: 11, marginBottom: 8 },
+  actionEmoji: { fontSize: 22, marginBottom: 6 },
+  actionText: { fontWeight: "700", color: "#111" },
+  designSection: {
+    marginHorizontal: 20,
+    marginTop: 16,
+    backgroundColor: "#FFF",
+    borderRadius: 24,
+    padding: 16,
   },
-  miniColorDot: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#DDD",
-  },
-  actionEmoji: { fontSize: 22 },
-  actionText: { fontSize: 12, fontWeight: "bold", marginTop: 2 },
-  designSection: { paddingHorizontal: 20, marginBottom: 25 },
   sectionLabel: {
     fontSize: 12,
-    fontWeight: "900",
-    color: "#8E8E93",
+    fontWeight: "800",
+    color: "#8A8A8E",
     marginBottom: 10,
-    letterSpacing: 1,
   },
-  styleBtn: {
-    padding: 12,
-    borderRadius: 15,
-    backgroundColor: "#F2F2F7",
+  sectionLabelTopSpacing: { marginTop: 18 },
+  sectionLabelSmall: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#8A8A8E",
+    marginBottom: 8,
+  },
+  selectorRow: { paddingRight: 4 },
+  selectorCard: {
+    width: 88,
+    paddingVertical: 10,
+    marginRight: 10,
+    borderRadius: 16,
+    borderWidth: 1.2,
+    borderColor: "#E5E5EA",
+    backgroundColor: "#FFF",
     alignItems: "center",
-    borderWidth: 1.5,
-    borderColor: "transparent",
+    position: "relative",
   },
-  activeBtn: { borderColor: "#007AFF", backgroundColor: "#E8F2FF" },
-  paletteCircle: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+  selectorCardActive: { borderColor: "#007AFF", backgroundColor: "#F1F7FF" },
+  selectorLabel: {
+    marginTop: 8,
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#111",
+  },
+  selectorLabelActive: { color: "#007AFF" },
+  lockMini: { position: "absolute", top: 6, right: 6, fontSize: 11 },
+  gradientToggleRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    marginRight: 15,
-    paddingLeft: 8,
+    gap: 10,
+    marginBottom: 8,
   },
-  innerCircle: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
+  styleBtn: {
     borderWidth: 1,
-    borderColor: "#FFF",
-  },
-  resetBtn: {
-    justifyContent: "center",
+    borderColor: "#E5E5EA",
+    backgroundColor: "#FFF",
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 12,
     alignItems: "center",
-    paddingRight: 20,
+    justifyContent: "center",
   },
-  inputArea: { width: "90%", alignSelf: "center" },
+  styleBtnText: { color: "#111", fontWeight: "700" },
+  activeBtn: { borderColor: "#007AFF", backgroundColor: "#EAF3FF" },
+  flexOne: { flex: 1 },
+  gradientEditBtn: { borderColor: "#007AFF", backgroundColor: "#E8F2FF" },
+  gradientEditInner: { flexDirection: "row", alignItems: "center", gap: 6 },
+  miniColorDot: { width: 16, height: 16, borderRadius: 8 },
+  arrowText: { fontSize: 12, fontWeight: "700" },
+  gradientEditText: { fontSize: 11, color: "#007AFF", fontWeight: "700" },
+  gradientDirectionWrap: { marginBottom: 12 },
+  gradientDirectionsRow: { flexDirection: "row", gap: 8 },
+  directionBtn: { paddingVertical: 10 },
+  directionEmoji: { fontSize: 18 },
+  directionLabel: { fontSize: 11, fontWeight: "700", marginTop: 2 },
+  cornerBtn: {
+    marginBottom: 12,
+    alignSelf: "flex-start",
+    paddingHorizontal: 18,
+  },
+  paletteCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    marginRight: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    flexDirection: "row",
+    backgroundColor: "#FFF",
+  },
+  innerCircle: { width: 20, height: 20, borderRadius: 10 },
+  resetBtn: { paddingHorizontal: 14, justifyContent: "center" },
+  resetText: { fontSize: 12, color: "#888" },
+  inputArea: {
+    marginHorizontal: 20,
+    marginTop: 16,
+    backgroundColor: "#FFF",
+    borderRadius: 24,
+    padding: 16,
+  },
   inputWrapper: {
-    backgroundColor: "#F2F2F7",
-    borderRadius: 22,
-    paddingHorizontal: 20,
-    height: 60,
-    justifyContent: "center",
-    marginBottom: 15,
+    backgroundColor: "#F5F5F7",
+    borderRadius: 16,
+    paddingHorizontal: 14,
+    marginBottom: 12,
   },
-  textInput: { fontSize: 16 },
+  textInput: { height: 50, color: "#111" },
   dynamicButton: {
-    backgroundColor: "#FFCC00",
-    height: 60,
-    borderRadius: 22,
-    justifyContent: "center",
+    borderRadius: 16,
+    backgroundColor: "#F2F4F7",
+    paddingVertical: 15,
     alignItems: "center",
-    marginBottom: 10,
+    marginBottom: 12,
   },
-  dynamicButtonText: { fontWeight: "900", color: "#000" },
-  rowButtons: { flexDirection: "row", justifyContent: "space-between" },
+  darkButton: { backgroundColor: "#000" },
+  dynamicButtonText: { fontWeight: "800", color: "#111" },
+  lightText: { color: "#FFF" },
+  rowButtons: { flexDirection: "row", gap: 12 },
   secondaryButton: {
-    width: "48%",
-    height: 55,
-    borderRadius: 22,
-    justifyContent: "center",
+    flex: 1,
+    backgroundColor: "#F5F5F7",
+    borderRadius: 16,
+    paddingVertical: 14,
     alignItems: "center",
-    borderWidth: 1.5,
-    borderColor: "#000",
   },
-  secondaryButtonText: { fontWeight: "bold" },
-  dashboardContainer: { paddingHorizontal: 20, marginTop: 30 },
+  secondaryButtonText: { fontWeight: "700", color: "#111" },
+  dashboardContainer: {
+    marginHorizontal: 20,
+    marginTop: 16,
+    backgroundColor: "#FFF",
+    borderRadius: 24,
+    padding: 16,
+  },
   dashboardHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 15,
+    marginBottom: 12,
   },
-  dashboardTitle: { fontSize: 22, fontWeight: "800" },
-  qrItemCard: {
-    backgroundColor: "#F9F9F9",
-    padding: 15,
-    borderRadius: 20,
-    flexDirection: "row",
-    justifyContent: "space-between",
+  dashboardTitle: { fontSize: 18, fontWeight: "800", color: "#111" },
+  refreshText: { color: "#007AFF" },
+  emptyState: {
+    backgroundColor: "#F7F8FA",
+    borderRadius: 16,
+    padding: 18,
     alignItems: "center",
+  },
+  emptyStateText: { color: "#888" },
+  qrItemCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#F7F8FA",
+    borderRadius: 18,
+    padding: 14,
     marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#EEE",
   },
+  qrItemLeft: { flex: 1 },
+  qrItemTitle: { fontWeight: "bold", fontSize: 15 },
   scanBadge: {
-    backgroundColor: "#E8F2FF",
     alignSelf: "flex-start",
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    marginTop: 5,
+    marginTop: 8,
+    backgroundColor: "#EEF6FF",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
   },
-  scanText: { fontSize: 11, color: "#007AFF", fontWeight: "bold" },
+  scanText: { fontSize: 12, fontWeight: "700", color: "#007AFF" },
   editBtn: {
-    backgroundColor: "#000",
+    backgroundColor: "#007AFF",
     paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 12,
+    alignItems: "center",
     justifyContent: "center",
   },
-  emptyState: {
-    alignItems: "center",
-    padding: 40,
-    backgroundColor: "#F9F9F9",
-    borderRadius: 20,
-  },
+  editBtnText: { color: "#FFF", fontWeight: "bold", fontSize: 12 },
   blurOverlay: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.4)",
@@ -1513,16 +2198,18 @@ const styles = StyleSheet.create({
     height: 5,
     backgroundColor: "#E5E5EA",
     borderRadius: 10,
-    marginBottom: 20,
+    marginBottom: 16,
   },
-  sheetTitle: { fontSize: 20, fontWeight: "bold", marginBottom: 16 },
-  pickerBox: { height: 260, width: "100%" },
+  sheetTitle: {
+    fontSize: 20,
+    fontWeight: "bold",
+    marginBottom: 16,
+    alignSelf: "flex-start",
+  },
   hexRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
-    marginTop: 14,
-    marginBottom: 4,
     width: "100%",
   },
   hexPreview: {
@@ -1540,8 +2227,15 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 16,
     fontWeight: "600",
-    fontFamily: "monospace",
   },
+  closeSheet: {
+    backgroundColor: "#000",
+    height: 58,
+    borderRadius: 22,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  closeSheetText: { color: "#FFF", fontWeight: "bold" },
   gradSlotBtn: {
     flex: 1,
     flexDirection: "row",
@@ -1556,42 +2250,6 @@ const styles = StyleSheet.create({
   },
   gradSlotBtnActive: { backgroundColor: "#000", borderColor: "#000" },
   gradSlotLabel: { fontSize: 13, fontWeight: "700", color: "#333" },
-  gradPreviewBar: {
-    width: "100%",
-    height: 10,
-    borderRadius: 6,
-    marginBottom: 12,
-  },
-  patternGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 12,
-    justifyContent: "center",
-    marginBottom: 20,
-    width: "100%",
-  },
-  patternCell: {
-    width: (width - 100) / 3,
-    paddingVertical: 14,
-    borderRadius: 18,
-    backgroundColor: "#F2F2F7",
-    alignItems: "center",
-    borderWidth: 2,
-    borderColor: "transparent",
-  },
-  patternCellActive: { borderColor: "#007AFF", backgroundColor: "#E8F2FF" },
-  patternEmoji: { fontSize: 28, marginBottom: 4 },
-  patternLabel: { fontSize: 11, fontWeight: "700", color: "#333" },
-  closeSheet: {
-    backgroundColor: "#000",
-    width: "100%",
-    height: 58,
-    borderRadius: 22,
-    justifyContent: "center",
-    alignItems: "center",
-    marginTop: 16,
-  },
-  closeSheetText: { color: "#FFF", fontWeight: "bold" },
   authCard: {
     backgroundColor: "#FFF",
     width: "85%",
