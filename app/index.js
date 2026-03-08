@@ -42,6 +42,7 @@ const PREMIUM_PALETTES = [
   { id: 3, name: "Lush", colors: ["#11998e", "#38ef7d"] },
   { id: 4, name: "Royal", colors: ["#8E2DE2", "#4A00E0"] },
   { id: 5, name: "Cyber", colors: ["#000000", "#34C759"] },
+  { id: 6, name: "Peach", colors: ["#F7971E", "#FFD200"] },
 ];
 
 const GRAD_DIRECTIONS = [
@@ -65,6 +66,13 @@ const QR_EYES = [
   { id: "soft", label: "Soft", premium: true },
   { id: "diamond", label: "Diamond", premium: true },
 ];
+
+const PLAN_LIMITS = {
+  free: 0,
+  plus: 5,
+  pro: 25,
+  agency: 200,
+};
 
 const QUIET_ZONE = 10;
 const LOGO_SIZE_RATIO = 0.22;
@@ -508,11 +516,16 @@ export default function App() {
   const [isSignUp, setIsSignUp] = useState(false);
   const [yukleniyor, setYukleniyor] = useState(false);
   const [qrIsmi, setQrIsmi] = useState("");
+  const [duzenlenenQr, setDuzenlenenQr] = useState(null);
+  const [seciliQrler, setSeciliQrler] = useState([]); // çoklu seçim
+  const [secimModu, setSecimModu] = useState(false); // seçim modu aktif mi
+  const [duzenlemeIsmi, setDuzenlemeIsmi] = useState(""); // düzenleme sırasında isim
 
   const qrReferansi = useRef();
   const scrollViewRef = useRef();
 
   const isLocked = !session || userProfile?.plan_type === "free";
+  const planLimit = PLAN_LIMITS[userProfile?.plan_type] ?? 0;
   const activeGrad1 = premiumPalet ? premiumPalet[0] : ozelGradyanRenk1;
   const activeGrad2 = premiumPalet ? premiumPalet[1] : ozelGradyanRenk2;
   const gradyanAktif = !isLocked && isGradient;
@@ -639,8 +652,79 @@ export default function App() {
       setAuthModalGorunur(true);
       return;
     }
+    if (duzenlenenQr) {
+      qrGuncelle();
+      return;
+    }
+    if (planLimit > 0 && userQrs.length >= planLimit) {
+      Alert.alert(
+        "Limit Doldu",
+        `${userProfile?.plan_type?.toUpperCase()} planinda en fazla ${planLimit} dinamik QR olusturabilirsiniz. Daha fazlasi icin planini yukselt.`,
+        [
+          { text: "Vazgec", style: "cancel" },
+          { text: "Plani Yukselt", onPress: () => setPaketModalGorunur(true) },
+        ],
+      );
+      return;
+    }
     setQrIsmi("");
     setIsimModalGorunur(true);
+  };
+
+  const qrGuncelle = async () => {
+    try {
+      const { error } = await supabase
+        .from("qrcodes")
+        .update({
+          title: duzenlemeIsmi.trim() || duzenlenenQr.title,
+          target_url: tempMetin,
+          qr_color: qrRengi,
+          is_gradient: gradyanAktif,
+          grad_color1: activeGrad1,
+          grad_color2: activeGrad2,
+          grad_direction: secilenYon.id,
+          grad_mode: gradyanModu,
+        })
+        .eq("id", duzenlenenQr.id)
+        .eq("user_id", session.user.id);
+      if (error) throw error;
+      setDuzenlenenQr(null);
+      setDuzenlemeIsmi("");
+      fetchUserQrs(session.user.id);
+      Alert.alert("Guncellendi", "QR basariyla guncellendi!");
+    } catch (err) {
+      Alert.alert("Hata", err?.message || "Guncellenemedi.");
+    }
+  };
+
+  const topluSil = () => {
+    if (seciliQrler.length === 0) return;
+    Alert.alert(
+      "Secilenleri Sil",
+      `${seciliQrler.length} adet QR silinsin mi?`,
+      [
+        { text: "Vazgec", style: "cancel" },
+        {
+          text: "Sil",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              const { error } = await supabase
+                .from("qrcodes")
+                .delete()
+                .in("id", seciliQrler)
+                .eq("user_id", session.user.id);
+              if (error) throw error;
+              setSeciliQrler([]);
+              setSecimModu(false);
+              fetchUserQrs(session.user.id);
+            } catch (err) {
+              Alert.alert("Hata", err?.message || "Silinemedi.");
+            }
+          },
+        },
+      ],
+    );
   };
 
   const qrKaydetOnayla = async () => {
@@ -657,6 +741,11 @@ export default function App() {
           target_url: tempMetin,
           qr_color: qrRengi,
           slug,
+          is_gradient: gradyanAktif,
+          grad_color1: activeGrad1,
+          grad_color2: activeGrad2,
+          grad_direction: secilenYon.id,
+          grad_mode: gradyanModu,
         },
       ]);
       if (error) throw error;
@@ -849,6 +938,9 @@ export default function App() {
     setHexGrad1("#FF512F");
     setHexGrad2("#DD2476");
     setGradyanModu("full");
+    setQrRengi("#000000");
+    setHexInput("#000000");
+    setSecilenLogo(null);
   };
 
   const patternSec = (item) => {
@@ -954,6 +1046,10 @@ export default function App() {
             >
               <Text style={styles.actionEmoji}>{isLocked ? "✨🔒" : "✨"}</Text>
               <Text style={styles.actionText}>Logo</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.mainAction} onPress={sifirlaDesign}>
+              <Text style={styles.actionEmoji}>↺</Text>
+              <Text style={styles.actionText}>Sifirla</Text>
             </TouchableOpacity>
           </View>
 
@@ -1196,14 +1292,22 @@ export default function App() {
                   />
                 </TouchableOpacity>
               ))}
-              <TouchableOpacity style={styles.resetBtn} onPress={sifirlaDesign}>
-                <Text style={styles.resetText}>↺ Sifirla</Text>
-              </TouchableOpacity>
             </ScrollView>
           </View>
 
           {/* URL INPUT */}
           <View style={styles.inputArea}>
+            {duzenlenenQr && (
+              <View style={[styles.inputWrapper, { marginBottom: 10 }]}>
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="QR kod adi..."
+                  value={duzenlemeIsmi}
+                  onChangeText={setDuzenlemeIsmi}
+                  maxLength={40}
+                />
+              </View>
+            )}
             <View style={styles.inputWrapper}>
               <TextInput
                 style={styles.textInput}
@@ -1238,12 +1342,36 @@ export default function App() {
               <TouchableOpacity
                 style={[
                   styles.dynamicButton,
-                  { backgroundColor: "#34C759", marginBottom: 10 },
+                  {
+                    backgroundColor: duzenlenenQr ? "#007AFF" : "#34C759",
+                    marginBottom: duzenlenenQr ? 6 : 10,
+                  },
                 ]}
                 onPress={qrKaydet}
               >
                 <Text style={[styles.dynamicButtonText, styles.lightText]}>
-                  DINAMIK QR OLUSTUR VE KAYDET
+                  {duzenlenenQr
+                    ? "✏️ DEGISIKLIKLERI KAYDET"
+                    : "DINAMIK QR OLUSTUR VE KAYDET"}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {duzenlenenQr && (
+              <TouchableOpacity
+                style={[
+                  styles.dynamicButton,
+                  { backgroundColor: "#F2F2F7", marginBottom: 10 },
+                ]}
+                onPress={() => {
+                  setDuzenlenenQr(null);
+                  setDuzenlemeIsmi("");
+                  sifirlaDesign();
+                  setTempMetin("https://articqr.studio");
+                  setMetin("https://articqr.studio");
+                }}
+              >
+                <Text style={styles.dynamicButtonText}>
+                  ✕ Duzenlemeyi Iptal Et
                 </Text>
               </TouchableOpacity>
             )}
@@ -1267,11 +1395,79 @@ export default function App() {
           {session && (
             <View style={styles.dashboardContainer}>
               <View style={styles.dashboardHeaderRow}>
-                <Text style={styles.dashboardTitle}>Koleksiyonum</Text>
-                <TouchableOpacity onPress={() => fetchUserQrs(session.user.id)}>
-                  <Text style={styles.refreshText}>Yenile ↻</Text>
-                </TouchableOpacity>
+                <Text style={styles.dashboardTitle}>
+                  Koleksiyonum
+                  {"  "}
+                  <Text
+                    style={{
+                      fontSize: 13,
+                      fontWeight: "700",
+                      color:
+                        userQrs.length >= planLimit && planLimit > 0
+                          ? "#FF3B30"
+                          : "#007AFF",
+                    }}
+                  >
+                    {userQrs.length}/{planLimit === 0 ? "∞" : planLimit}
+                  </Text>
+                </Text>
+                <View
+                  style={{
+                    flexDirection: "row",
+                    gap: 10,
+                    alignItems: "center",
+                  }}
+                >
+                  {secimModu && seciliQrler.length > 0 && (
+                    <TouchableOpacity onPress={topluSil}>
+                      <Text style={{ color: "#FF3B30", fontWeight: "700" }}>
+                        Sil ({seciliQrler.length})
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    onPress={() => {
+                      setSecimModu(!secimModu);
+                      setSeciliQrler([]);
+                    }}
+                  >
+                    <Text style={{ color: "#007AFF", fontWeight: "700" }}>
+                      {secimModu ? "Iptal" : "Sec"}
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    onPress={() => fetchUserQrs(session.user.id)}
+                  >
+                    <Text style={styles.refreshText}>↻</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
+
+              {secimModu && userQrs.length > 0 && (
+                <TouchableOpacity
+                  style={{ marginBottom: 10, alignSelf: "flex-start" }}
+                  onPress={() =>
+                    setSeciliQrler(
+                      seciliQrler.length === userQrs.length
+                        ? []
+                        : userQrs.map((q) => q.id),
+                    )
+                  }
+                >
+                  <Text
+                    style={{
+                      color: "#007AFF",
+                      fontSize: 13,
+                      fontWeight: "700",
+                    }}
+                  >
+                    {seciliQrler.length === userQrs.length
+                      ? "✕ Secimi Kaldir"
+                      : "✓ Tumunu Sec"}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
               {userQrs.length === 0 ? (
                 <View style={styles.emptyState}>
                   <Text style={styles.emptyStateText}>
@@ -1279,55 +1475,134 @@ export default function App() {
                   </Text>
                 </View>
               ) : (
-                userQrs.map((item) => (
-                  <View key={item.id} style={styles.qrItemCard}>
-                    <View style={styles.qrItemLeft}>
-                      <Text style={styles.qrItemTitle} numberOfLines={1}>
-                        {item.title}
-                      </Text>
-                      <View style={styles.scanBadge}>
-                        <Text style={styles.scanText}>
-                          📊 {item.scans || 0} Tarama
-                        </Text>
+                userQrs.map((item) => {
+                  const secili = seciliQrler.includes(item.id);
+                  return (
+                    <TouchableOpacity
+                      key={item.id}
+                      activeOpacity={secimModu ? 0.7 : 1}
+                      onPress={() => {
+                        if (!secimModu) return;
+                        setSeciliQrler((prev) =>
+                          secili
+                            ? prev.filter((id) => id !== item.id)
+                            : [...prev, item.id],
+                        );
+                      }}
+                      onLongPress={() => {
+                        if (!secimModu) {
+                          setSecimModu(true);
+                          setSeciliQrler([item.id]);
+                        }
+                      }}
+                    >
+                      <View
+                        style={[
+                          styles.qrItemCard,
+                          secili && {
+                            borderWidth: 2,
+                            borderColor: "#007AFF",
+                            backgroundColor: "#EAF3FF",
+                          },
+                        ]}
+                      >
+                        {secimModu && (
+                          <View
+                            style={{
+                              width: 24,
+                              height: 24,
+                              borderRadius: 12,
+                              borderWidth: 2,
+                              borderColor: secili ? "#007AFF" : "#CCC",
+                              backgroundColor: secili ? "#007AFF" : "#FFF",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              marginRight: 10,
+                            }}
+                          >
+                            {secili && (
+                              <Text
+                                style={{
+                                  color: "#FFF",
+                                  fontSize: 13,
+                                  fontWeight: "900",
+                                }}
+                              >
+                                ✓
+                              </Text>
+                            )}
+                          </View>
+                        )}
+                        <View style={styles.qrItemLeft}>
+                          <Text style={styles.qrItemTitle} numberOfLines={1}>
+                            {item.title}
+                          </Text>
+                          <View style={styles.scanBadge}>
+                            <Text style={styles.scanText}>
+                              📊 {item.scans || 0} Tarama
+                            </Text>
+                          </View>
+                        </View>
+                        {!secimModu && (
+                          <View style={{ flexDirection: "row", gap: 6 }}>
+                            <TouchableOpacity
+                              style={styles.editBtn}
+                              onPress={() => {
+                                setTempMetin(
+                                  item.target_url || "https://articqr.studio",
+                                );
+                                setMetin(
+                                  `https://slwtvoyymwyakklinjvr.supabase.co/functions/v1/redirect?s=${item.slug}`,
+                                );
+                                setQrRengi(item.qr_color || "#000000");
+                                setHexInput(item.qr_color || "#000000");
+                                setSelectedPattern(
+                                  item.pattern_type || "square",
+                                );
+                                setSelectedEye(item.eye_type || "square");
+                                setIsGradient(item.is_gradient || false);
+                                if (item.grad_color1) {
+                                  setOzelGradyanRenk1(item.grad_color1);
+                                  setHexGrad1(item.grad_color1);
+                                }
+                                if (item.grad_color2) {
+                                  setOzelGradyanRenk2(item.grad_color2);
+                                  setHexGrad2(item.grad_color2);
+                                }
+                                if (item.grad_direction)
+                                  setSecilenYon(
+                                    GRAD_DIRECTIONS.find(
+                                      (d) => d.id === item.grad_direction,
+                                    ) || GRAD_DIRECTIONS[0],
+                                  );
+                                if (item.grad_mode)
+                                  setGradyanModu(item.grad_mode);
+                                setPremiumPalet(null);
+                                setDuzenlenenQr(item);
+                                setDuzenlemeIsmi(item.title || "");
+                                scrollViewRef.current?.scrollTo({
+                                  y: 0,
+                                  animated: true,
+                                });
+                              }}
+                            >
+                              <Text style={styles.editBtnText}>Duzenle</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                              style={[
+                                styles.editBtn,
+                                { backgroundColor: "#FF3B30" },
+                              ]}
+                              onPress={() => qrSil(item)}
+                            >
+                              <Text style={styles.editBtnText}>Sil</Text>
+                            </TouchableOpacity>
+                          </View>
+                        )}
                       </View>
-                    </View>
-                    <View style={{ flexDirection: "row", gap: 6 }}>
-                      <TouchableOpacity
-                        style={styles.editBtn}
-                        onPress={() => {
-                          setTempMetin(
-                            item.target_url || "https://articqr.studio",
-                          );
-                          setMetin(
-                            `https://slwtvoyymwyakklinjvr.supabase.co/functions/v1/redirect?s=${item.slug}`,
-                          );
-                          setQrRengi(item.qr_color || "#000000");
-                          setHexInput(item.qr_color || "#000000");
-                          setSelectedPattern(item.pattern_type || "square");
-                          setSelectedEye(item.eye_type || "square");
-                          Alert.alert(
-                            "Yuklendi",
-                            "Duzenleme icin yukari aktarildi.",
-                          );
-                        }}
-                      >
-                        <Text style={styles.editBtnText}>Duzenle</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.editBtn, { backgroundColor: "#34C759" }]}
-                        onPress={() => testTarama(item)}
-                      >
-                        <Text style={styles.editBtnText}>Test Et</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.editBtn, { backgroundColor: "#FF3B30" }]}
-                        onPress={() => qrSil(item)}
-                      >
-                        <Text style={styles.editBtnText}>Sil</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ))
+                    </TouchableOpacity>
+                  );
+                })
               )}
             </View>
           )}
@@ -1998,7 +2273,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#FFF",
     borderRadius: 18,
-    paddingVertical: 16,
+    paddingVertical: 12,
     alignItems: "center",
     justifyContent: "center",
   },
