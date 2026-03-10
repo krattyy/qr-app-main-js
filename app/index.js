@@ -2,6 +2,7 @@
 
 import * as ImagePicker from "expo-image-picker";
 import * as MediaLibrary from "expo-media-library";
+import * as Notifications from "expo-notifications";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import QRCodeGenerator from "qrcode";
@@ -12,6 +13,7 @@ import {
   Dimensions,
   Keyboard,
   Modal,
+  Platform,
   ScrollView,
   StyleSheet,
   Text,
@@ -19,6 +21,7 @@ import {
   TouchableOpacity,
   View,
 } from "react-native";
+import Purchases, { LOG_LEVEL } from "react-native-purchases";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import Svg, {
   Circle,
@@ -510,6 +513,7 @@ export default function App() {
   const [isimModalGorunur, setIsimModalGorunur] = useState(false);
   const [indirModalGorunur, setIndirModalGorunur] = useState(false);
   const [paylasModalGorunur, setPaylasModalGorunur] = useState(false);
+  const [profilModalGorunur, setProfilModalGorunur] = useState(false);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -531,13 +535,37 @@ export default function App() {
   const gradyanAktif = !isLocked && isGradient;
   const gradDir = [secilenYon.id];
 
+  // Üyelik bitiş uyarısı — bitiş tarihi varsa ve 3 gün veya daha az kaldıysa
+  const subEndDate = userProfile?.subscription_end_date
+    ? new Date(userProfile.subscription_end_date)
+    : null;
+  const now = new Date();
+  const gunKaldi = subEndDate
+    ? Math.ceil((subEndDate - now) / (1000 * 60 * 60 * 24))
+    : null;
+  const uyariGoster =
+    gunKaldi !== null &&
+    gunKaldi <= 3 &&
+    gunKaldi >= -3 &&
+    userProfile?.plan_type !== "free";
+
   useEffect(() => {
+    // RevenueCat başlat
+    Purchases.setLogLevel(LOG_LEVEL.VERBOSE);
+    if (Platform.OS === "ios") {
+      Purchases.configure({ apiKey: "test_WhiOjJSIGbYJLQtLYfZHmCvawMl" });
+    } else if (Platform.OS === "android") {
+      Purchases.configure({ apiKey: "test_WhiOjJSIGbYJLQtLYfZHmCvawMl" });
+    }
+
     const initialize = async () => {
       const {
         data: { session: s },
       } = await supabase.auth.getSession();
       setSession(s);
       if (s) {
+        // RevenueCat'e kullanıcıyı tanıt
+        await Purchases.logIn(s.user.id);
         await fetchProfile(s.user.id);
         await fetchUserQrs(s.user.id);
       }
@@ -547,9 +575,11 @@ export default function App() {
       async (_event, newSession) => {
         setSession(newSession);
         if (newSession) {
+          await Purchases.logIn(newSession.user.id);
           await fetchProfile(newSession.user.id);
           await fetchUserQrs(newSession.user.id);
         } else {
+          await Purchases.logOut().catch(() => {});
           setUserProfile(null);
           setUserQrs([]);
         }
@@ -565,6 +595,17 @@ export default function App() {
       .eq("id", uid)
       .maybeSingle();
     if (data) setUserProfile(data);
+    // Push token kaydet
+    try {
+      const { status } = await Notifications.requestPermissionsAsync();
+      if (status === "granted") {
+        const token = (await Notifications.getExpoPushTokenAsync()).data;
+        await supabase
+          .from("profiles")
+          .update({ expo_push_token: token })
+          .eq("id", uid);
+      }
+    } catch {}
   };
 
   const fetchUserQrs = async (uid) => {
@@ -757,6 +798,94 @@ export default function App() {
         "Hata",
         err?.message || JSON.stringify(err) || "Kaydedilemedi.",
       );
+    }
+  };
+
+  const satinAl = async (planAdi) => {
+    try {
+      // RevenueCat'ten mevcut teklifleri al
+      const offerings = await Purchases.getOfferings();
+      if (!offerings.current) {
+        Alert.alert("Hata", "Urunler yuklenemedi, lutfen tekrar deneyin.");
+        return;
+      }
+
+      // Plan adına göre package bul
+      const paketMap = {
+        plus: "plus_monthly",
+        pro: "pro_monthly",
+        agency: "agency_monthly",
+      };
+      const paketId = paketMap[planAdi.toLowerCase()];
+      const paket =
+        offerings.current.availablePackages.find(
+          (p) => p.identifier === paketId,
+        ) || offerings.current.availablePackages[0];
+
+      if (!paket) {
+        Alert.alert("Hata", "Bu plan su an mevcut degil.");
+        return;
+      }
+
+      const { customerInfo } = await Purchases.purchasePackage(paket);
+
+      // Satın alma başarılı — Supabase'i güncelle
+      const aktifPlan =
+        Object.keys(customerInfo.entitlements.active)[0] ||
+        planAdi.toLowerCase();
+      const bitisTarihi = customerInfo.latestExpirationDate;
+
+      await supabase
+        .from("profiles")
+        .update({
+          plan_type: aktifPlan,
+          subscription_end_date: bitisTarihi,
+        })
+        .eq("id", session.user.id);
+
+      // QR'ları tekrar aktif et
+      await supabase
+        .from("qrcodes")
+        .update({ is_active: true, notified_inactive: false })
+        .eq("user_id", session.user.id);
+
+      await fetchProfile(session.user.id);
+      await fetchUserQrs(session.user.id);
+      setPaketModalGorunur(false);
+      Alert.alert(
+        "Hosgeldin! 🎉",
+        `${aktifPlan.toUpperCase()} planina gecildi.`,
+      );
+    } catch (err) {
+      if (!err.userCancelled) {
+        Alert.alert("Hata", err.message || "Satin alma basarisiz.");
+      }
+    }
+  };
+
+  const aboneligiGeriYukle = async () => {
+    try {
+      const customerInfo = await Purchases.restorePurchases();
+      const aktifEntitlement = Object.keys(customerInfo.entitlements.active)[0];
+      if (aktifEntitlement) {
+        const bitisTarihi = customerInfo.latestExpirationDate;
+        await supabase
+          .from("profiles")
+          .update({
+            plan_type: aktifEntitlement,
+            subscription_end_date: bitisTarihi,
+          })
+          .eq("id", session.user.id);
+        await fetchProfile(session.user.id);
+        Alert.alert(
+          "Basarili",
+          `${aktifEntitlement.toUpperCase()} plani geri yuklendi!`,
+        );
+      } else {
+        Alert.alert("Bulunamadi", "Aktif abonelik bulunamadi.");
+      }
+    } catch (err) {
+      Alert.alert("Hata", err.message || "Geri yukleme basarisiz.");
     }
   };
 
@@ -972,21 +1101,7 @@ export default function App() {
               style={styles.profileBtn}
               onPress={() =>
                 session
-                  ? Alert.alert(
-                      "Profil",
-                      `Plan: ${(userProfile?.plan_type || "free").toUpperCase()}\nEmail: ${session.user.email}`,
-                      [
-                        {
-                          text: "Cikis Yap",
-                          style: "destructive",
-                          onPress: () => {
-                            supabase.auth.signOut();
-                            setUserProfile(null);
-                          },
-                        },
-                        { text: "Kapat" },
-                      ],
-                    )
+                  ? setProfilModalGorunur(true)
                   : (setIsSignUp(false), setAuthModalGorunur(true))
               }
             >
@@ -999,7 +1114,44 @@ export default function App() {
             <View style={styles.headerSpacer} />
           </View>
 
-          {/* QR PREVIEW */}
+          {/* ÜYELİK BİTİŞ UYARISI */}
+          {uyariGoster && (
+            <TouchableOpacity
+              onPress={() => setPaketModalGorunur(true)}
+              style={[
+                styles.subWarningBanner,
+                { backgroundColor: gunKaldi <= 0 ? "#FFF0F0" : "#FFFBEA" },
+              ]}
+            >
+              <Text style={[styles.subWarningIcon]}>
+                {gunKaldi <= 0 ? "🔴" : "⚠️"}
+              </Text>
+              <View style={{ flex: 1 }}>
+                <Text
+                  style={[
+                    styles.subWarningTitle,
+                    { color: gunKaldi <= 0 ? "#FF3B30" : "#B8860B" },
+                  ]}
+                >
+                  {gunKaldi <= 0
+                    ? `Uyeliginiz ${Math.abs(gunKaldi)} gun once bitti`
+                    : gunKaldi === 0
+                      ? "Uyeliginiz bugun bitiyor"
+                      : `Uyeliginize ${gunKaldi} gun kaldi`}
+                </Text>
+                <Text style={styles.subWarningDesc}>
+                  {gunKaldi <= 0
+                    ? "QR kodlariniz pasif hale geldi. Aktifleştirmek icin uyeliginizi yenileyin."
+                    : "Uyeliginizi yenilemezseniz QR kodlariniz pasif hale gelecektir."}
+                </Text>
+              </View>
+              <Text
+                style={{ fontSize: 12, color: "#007AFF", fontWeight: "700" }}
+              >
+                Yenile →
+              </Text>
+            </TouchableOpacity>
+          )}
           <View style={styles.previewCard}>
             <View
               ref={qrReferansi}
@@ -1537,10 +1689,36 @@ export default function App() {
                           <Text style={styles.qrItemTitle} numberOfLines={1}>
                             {item.title}
                           </Text>
-                          <View style={styles.scanBadge}>
-                            <Text style={styles.scanText}>
-                              📊 {item.scans || 0} Tarama
-                            </Text>
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              gap: 6,
+                              alignItems: "center",
+                              marginTop: 6,
+                            }}
+                          >
+                            <View style={styles.scanBadge}>
+                              <Text style={styles.scanText}>
+                                📊 {item.scans || 0} Tarama
+                              </Text>
+                            </View>
+                            {item.is_active === false && (
+                              <View
+                                style={[
+                                  styles.scanBadge,
+                                  { backgroundColor: "#FFF0F0" },
+                                ]}
+                              >
+                                <Text
+                                  style={[
+                                    styles.scanText,
+                                    { color: "#FF3B30" },
+                                  ]}
+                                >
+                                  🔴 Pasif
+                                </Text>
+                              </View>
+                            )}
                           </View>
                         </View>
                         {!secimModu && (
@@ -1606,6 +1784,354 @@ export default function App() {
               )}
             </View>
           )}
+
+          {/* PROFİL MODAL */}
+          <Modal
+            visible={profilModalGorunur}
+            animationType="slide"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View
+                style={[
+                  styles.bottomSheet,
+                  { paddingHorizontal: 24, paddingBottom: 40 },
+                ]}
+              >
+                <View
+                  style={[
+                    styles.dragHandle,
+                    { marginTop: 14, marginBottom: 24 },
+                  ]}
+                />
+
+                {/* Avatar + Email */}
+                <View style={{ alignItems: "center", marginBottom: 24 }}>
+                  <View
+                    style={{
+                      width: 76,
+                      height: 76,
+                      borderRadius: 38,
+                      backgroundColor: "#1C1C1E",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      marginBottom: 12,
+                      shadowColor: "#000",
+                      shadowOpacity: 0.12,
+                      shadowRadius: 12,
+                      shadowOffset: { width: 0, height: 4 },
+                    }}
+                  >
+                    <Text
+                      style={{ fontSize: 32, color: "#fff", fontWeight: "800" }}
+                    >
+                      {session?.user?.email?.[0]?.toUpperCase() || "?"}
+                    </Text>
+                  </View>
+                  <Text
+                    style={{
+                      fontSize: 15,
+                      fontWeight: "700",
+                      color: "#111",
+                      letterSpacing: -0.3,
+                    }}
+                    numberOfLines={1}
+                  >
+                    {session?.user?.email}
+                  </Text>
+                </View>
+
+                {/* Plan + Bitiş */}
+                <View
+                  style={{
+                    width: "100%",
+                    backgroundColor: "#F7F8FA",
+                    borderRadius: 20,
+                    padding: 18,
+                    marginBottom: 12,
+                  }}
+                >
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom:
+                        subEndDate && userProfile?.plan_type !== "free"
+                          ? 14
+                          : 0,
+                    }}
+                  >
+                    <View>
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          color: "#999",
+                          fontWeight: "700",
+                          letterSpacing: 0.5,
+                          marginBottom: 4,
+                        }}
+                      >
+                        AKTİF PLAN
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: 22,
+                          fontWeight: "900",
+                          color: "#111",
+                        }}
+                      >
+                        {(userProfile?.plan_type || "free")
+                          .charAt(0)
+                          .toUpperCase() +
+                          (userProfile?.plan_type || "free").slice(1)}
+                      </Text>
+                    </View>
+                    <View
+                      style={{
+                        width: 44,
+                        height: 44,
+                        borderRadius: 22,
+                        backgroundColor: "#1C1C1E",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Text style={{ fontSize: 20 }}>
+                        {userProfile?.plan_type === "agency"
+                          ? "🏢"
+                          : userProfile?.plan_type === "pro"
+                            ? "⚡"
+                            : userProfile?.plan_type === "plus"
+                              ? "✨"
+                              : "🆓"}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {subEndDate && userProfile?.plan_type !== "free" && (
+                    <View
+                      style={{
+                        borderTopWidth: 1,
+                        borderTopColor: "#EBEBEB",
+                        paddingTop: 14,
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 13,
+                          color: "#888",
+                          fontWeight: "600",
+                        }}
+                      >
+                        Bitiş Tarihi
+                      </Text>
+                      <View style={{ alignItems: "flex-end" }}>
+                        <Text
+                          style={{
+                            fontSize: 13,
+                            fontWeight: "800",
+                            color:
+                              gunKaldi !== null && gunKaldi <= 3
+                                ? "#FF3B30"
+                                : "#34C759",
+                          }}
+                        >
+                          {subEndDate.toLocaleDateString("tr-TR", {
+                            day: "numeric",
+                            month: "long",
+                            year: "numeric",
+                          })}
+                        </Text>
+                        {gunKaldi !== null && gunKaldi > 0 && (
+                          <Text
+                            style={{
+                              fontSize: 11,
+                              color: "#999",
+                              marginTop: 2,
+                            }}
+                          >
+                            {gunKaldi} gün kaldı
+                          </Text>
+                        )}
+                      </View>
+                    </View>
+                  )}
+
+                  {!subEndDate && userProfile?.plan_type !== "free" && (
+                    <View
+                      style={{
+                        borderTopWidth: 1,
+                        borderTopColor: "#EBEBEB",
+                        paddingTop: 12,
+                        marginTop: 12,
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, color: "#AAAAAA" }}>
+                        Bitiş tarihi belirlenmemiş
+                      </Text>
+                    </View>
+                  )}
+
+                  {userProfile?.plan_type === "free" && (
+                    <View
+                      style={{
+                        borderTopWidth: 1,
+                        borderTopColor: "#EBEBEB",
+                        paddingTop: 12,
+                        marginTop: 12,
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, color: "#AAAAAA" }}>
+                        Dinamik QR için plan yükselt
+                      </Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* QR Kullanımı */}
+                {userProfile?.plan_type !== "free" && (
+                  <View
+                    style={{
+                      width: "100%",
+                      backgroundColor: "#F7F8FA",
+                      borderRadius: 20,
+                      padding: 18,
+                      marginBottom: 12,
+                    }}
+                  >
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        marginBottom: 12,
+                      }}
+                    >
+                      <Text
+                        style={{
+                          fontSize: 11,
+                          color: "#999",
+                          fontWeight: "700",
+                          letterSpacing: 0.5,
+                        }}
+                      >
+                        QR KULLANIMI
+                      </Text>
+                      <Text
+                        style={{
+                          fontSize: 13,
+                          fontWeight: "800",
+                          color:
+                            userQrs.length >= planLimit ? "#FF3B30" : "#111",
+                        }}
+                      >
+                        {userQrs.length} / {planLimit}
+                      </Text>
+                    </View>
+                    <View
+                      style={{
+                        height: 8,
+                        backgroundColor: "#E5E5EA",
+                        borderRadius: 4,
+                      }}
+                    >
+                      <View
+                        style={{
+                          height: 8,
+                          borderRadius: 4,
+                          width: `${Math.min((userQrs.length / planLimit) * 100, 100)}%`,
+                          backgroundColor:
+                            userQrs.length >= planLimit ? "#FF3B30" : "#1C1C1E",
+                        }}
+                      />
+                    </View>
+                    <Text
+                      style={{ fontSize: 12, color: "#AAAAAA", marginTop: 8 }}
+                    >
+                      {planLimit - userQrs.length > 0
+                        ? `${planLimit - userQrs.length} adet daha oluşturabilirsiniz`
+                        : "Limite ulaştınız"}
+                    </Text>
+                  </View>
+                )}
+
+                {/* Planı Yükselt */}
+                {userProfile?.plan_type === "free" && (
+                  <TouchableOpacity
+                    style={{
+                      width: "100%",
+                      backgroundColor: "#FFCC00",
+                      borderRadius: 20,
+                      paddingVertical: 18,
+                      alignItems: "center",
+                      marginBottom: 10,
+                    }}
+                    onPress={() => {
+                      setProfilModalGorunur(false);
+                      setPaketModalGorunur(true);
+                    }}
+                  >
+                    <Text
+                      style={{ fontWeight: "800", color: "#111", fontSize: 15 }}
+                    >
+                      Planı Yükselt ✨
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                {/* Çıkış Yap */}
+                <TouchableOpacity
+                  style={{
+                    width: "100%",
+                    backgroundColor: "#FFF0F0",
+                    borderRadius: 20,
+                    paddingVertical: 18,
+                    alignItems: "center",
+                    marginBottom: 10,
+                    borderWidth: 1,
+                    borderColor: "#FFDADA",
+                  }}
+                  onPress={() => {
+                    supabase.auth.signOut();
+                    setUserProfile(null);
+                    setProfilModalGorunur(false);
+                  }}
+                >
+                  <Text
+                    style={{
+                      fontWeight: "800",
+                      color: "#FF3B30",
+                      fontSize: 15,
+                    }}
+                  >
+                    Çıkış Yap
+                  </Text>
+                </TouchableOpacity>
+
+                {/* Kapat */}
+                <TouchableOpacity
+                  style={{
+                    width: "100%",
+                    backgroundColor: "#F2F2F7",
+                    borderRadius: 20,
+                    paddingVertical: 18,
+                    alignItems: "center",
+                  }}
+                  onPress={() => setProfilModalGorunur(false)}
+                >
+                  <Text
+                    style={{ fontWeight: "700", color: "#666", fontSize: 15 }}
+                  >
+                    Kapat
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </Modal>
 
           {/* RENK MODAL */}
           <Modal
@@ -2133,6 +2659,7 @@ export default function App() {
                 {[
                   {
                     name: "Plus",
+                    planId: "plus",
                     price: "$4.99/ay",
                     features: [
                       "• 5 Adet Dinamik QR",
@@ -2144,6 +2671,7 @@ export default function App() {
                   },
                   {
                     name: "Pro 🔥",
+                    planId: "pro",
                     price: "$9.99/ay",
                     features: [
                       "• 25 Adet Dinamik QR",
@@ -2154,6 +2682,7 @@ export default function App() {
                   },
                   {
                     name: "Agency",
+                    planId: "agency",
                     price: "$39.00/ay",
                     features: [
                       "• 200 Adet Dinamik QR",
@@ -2188,9 +2717,13 @@ export default function App() {
                         plan.highlight && { backgroundColor: "#007AFF" },
                       ]}
                       onPress={() => {
-                        setPaketModalGorunur(false);
-                        setIsSignUp(true);
-                        setAuthModalGorunur(true);
+                        if (!session) {
+                          setPaketModalGorunur(false);
+                          setIsSignUp(true);
+                          setAuthModalGorunur(true);
+                        } else {
+                          satinAl(plan.planId);
+                        }
                       }}
                     >
                       <Text style={styles.planButtonText}>
@@ -2199,6 +2732,26 @@ export default function App() {
                     </TouchableOpacity>
                   </View>
                 ))}
+                {session && (
+                  <TouchableOpacity
+                    style={{
+                      alignItems: "center",
+                      paddingVertical: 12,
+                      marginBottom: 8,
+                    }}
+                    onPress={aboneligiGeriYukle}
+                  >
+                    <Text
+                      style={{
+                        color: "#007AFF",
+                        fontWeight: "700",
+                        fontSize: 14,
+                      }}
+                    >
+                      Aboneligi Geri Yukle
+                    </Text>
+                  </TouchableOpacity>
+                )}
               </ScrollView>
             </SafeAreaView>
           </Modal>
@@ -2250,6 +2803,20 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 4,
   },
+  subWarningBanner: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: 20,
+    marginTop: 10,
+    padding: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#FFD700",
+  },
+  subWarningIcon: { fontSize: 22 },
+  subWarningTitle: { fontWeight: "800", fontSize: 13, marginBottom: 2 },
+  subWarningDesc: { fontSize: 12, color: "#666", lineHeight: 16 },
   promoBadge: {
     marginTop: 14,
     paddingHorizontal: 14,
