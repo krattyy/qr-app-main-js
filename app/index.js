@@ -514,6 +514,10 @@ export default function App() {
   const [indirModalGorunur, setIndirModalGorunur] = useState(false);
   const [paylasModalGorunur, setPaylasModalGorunur] = useState(false);
   const [profilModalGorunur, setProfilModalGorunur] = useState(false);
+  const [analizModalGorunur, setAnalizModalGorunur] = useState(false);
+  const [analizQr, setAnalizQr] = useState(null);
+  const [analizData, setAnalizData] = useState(null);
+  const [analizYukleniyor, setAnalizYukleniyor] = useState(false);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -587,6 +591,108 @@ export default function App() {
     );
     return () => authListener.subscription.unsubscribe();
   }, []);
+
+  const fetchAnalytics = async (qrItem) => {
+    setAnalizQr(qrItem);
+    setAnalizYukleniyor(true);
+    setAnalizData(null);
+    setAnalizModalGorunur(true);
+    const plan = userProfile?.plan_type || "free";
+    try {
+      const base = supabase
+        .from("scan_logs")
+        .select("*")
+        .eq("qr_id", qrItem.id);
+
+      // Free: sadece toplam (zaten qrcodes.scans'da var)
+      if (plan === "free") {
+        setAnalizData({ plan, total: qrItem.scans || 0 });
+        setAnalizYukleniyor(false);
+        return;
+      }
+
+      const { data: logs } = await base;
+      if (!logs) {
+        setAnalizYukleniyor(false);
+        return;
+      }
+
+      const total = logs.length;
+
+      // Saatlik dağılım — server tarafında zaten local saat kaydedildi
+      const hourly = Array(24).fill(0);
+      logs.forEach((l) => {
+        if (l.hour !== null) hourly[l.hour]++;
+      });
+
+      // Platform (Pro+)
+      const platformCount = {};
+      logs.forEach((l) => {
+        if (l.platform)
+          platformCount[l.platform] = (platformCount[l.platform] || 0) + 1;
+      });
+
+      // Ülke (Pro+)
+      const countryCount = {};
+      logs.forEach((l) => {
+        if (l.country)
+          countryCount[l.country] = (countryCount[l.country] || 0) + 1;
+      });
+
+      // Benzersiz ziyaretçi (Pro+)
+      const uniqueVisitors = new Set(logs.map((l) => l.ip_hash).filter(Boolean))
+        .size;
+
+      // Günlük trend son 30 gün (Pro+)
+      const dailyCount = {};
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      logs
+        .filter((l) => new Date(l.scanned_at) > thirtyDaysAgo)
+        .forEach((l) => {
+          const day = l.scanned_at?.slice(0, 10);
+          if (day) dailyCount[day] = (dailyCount[day] || 0) + 1;
+        });
+
+      // Agency: cihaz tipi, OS, referrer, dil, haftalık gün
+      const deviceCount = {};
+      const osCount = {};
+      const referrerCount = {};
+      const langCount = {};
+      const dowCount = Array(7).fill(0);
+      if (plan === "agency") {
+        logs.forEach((l) => {
+          if (l.device_type)
+            deviceCount[l.device_type] = (deviceCount[l.device_type] || 0) + 1;
+          if (l.os_version)
+            osCount[l.os_version] = (osCount[l.os_version] || 0) + 1;
+          if (l.referrer)
+            referrerCount[l.referrer] = (referrerCount[l.referrer] || 0) + 1;
+          if (l.language)
+            langCount[l.language] = (langCount[l.language] || 0) + 1;
+          if (l.day_of_week !== null) dowCount[l.day_of_week]++;
+        });
+      }
+
+      setAnalizData({
+        plan,
+        total,
+        hourly,
+        platformCount,
+        countryCount,
+        uniqueVisitors,
+        dailyCount,
+        deviceCount,
+        osCount,
+        referrerCount,
+        langCount,
+        dowCount,
+      });
+    } catch (err) {
+      Alert.alert("Hata", "Analiz yuklenemedi.");
+    }
+    setAnalizYukleniyor(false);
+  };
 
   const fetchProfile = async (uid) => {
     const { data } = await supabase
@@ -1724,6 +1830,15 @@ export default function App() {
                         {!secimModu && (
                           <View style={{ flexDirection: "row", gap: 6 }}>
                             <TouchableOpacity
+                              style={[
+                                styles.editBtn,
+                                { backgroundColor: "#5856D6" },
+                              ]}
+                              onPress={() => fetchAnalytics(item)}
+                            >
+                              <Text style={styles.editBtnText}>📊</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
                               style={styles.editBtn}
                               onPress={() => {
                                 setTempMetin(
@@ -1784,6 +1899,500 @@ export default function App() {
               )}
             </View>
           )}
+
+          {/* ANALİTİK MODAL */}
+          <Modal
+            visible={analizModalGorunur}
+            animationType="slide"
+            transparent={true}
+          >
+            <View style={styles.blurOverlay}>
+              <View
+                style={[
+                  styles.bottomSheet,
+                  { paddingHorizontal: 0, paddingBottom: 0, maxHeight: "92%" },
+                ]}
+              >
+                <View style={[styles.dragHandle, { marginTop: 14 }]} />
+                <View
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    paddingHorizontal: 24,
+                    marginBottom: 4,
+                  }}
+                >
+                  <Text style={[styles.sheetTitle, { marginBottom: 0 }]}>
+                    📊 {analizQr?.title}
+                  </Text>
+                  <TouchableOpacity
+                    onPress={() => setAnalizModalGorunur(false)}
+                  >
+                    <Text style={{ fontSize: 22, color: "#888" }}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+                <ScrollView
+                  style={{ width: "100%" }}
+                  contentContainerStyle={{
+                    paddingHorizontal: 24,
+                    paddingBottom: 40,
+                  }}
+                >
+                  {analizYukleniyor ? (
+                    <ActivityIndicator
+                      size="large"
+                      color="#007AFF"
+                      style={{ marginTop: 40 }}
+                    />
+                  ) : analizData ? (
+                    <>
+                      {/* Toplam + Benzersiz */}
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          gap: 12,
+                          marginBottom: 16,
+                          marginTop: 8,
+                        }}
+                      >
+                        <View style={styles.analizKart}>
+                          <Text style={styles.analizSayi}>
+                            {analizData.total}
+                          </Text>
+                          <Text style={styles.analizLabel}>Toplam Tarama</Text>
+                        </View>
+                        {analizData.plan !== "free" &&
+                          analizData.plan !== "plus" && (
+                            <View style={styles.analizKart}>
+                              <Text style={styles.analizSayi}>
+                                {analizData.uniqueVisitors || 0}
+                              </Text>
+                              <Text style={styles.analizLabel}>
+                                Benzersiz Ziyaretçi
+                              </Text>
+                            </View>
+                          )}
+                      </View>
+
+                      {/* Free lock */}
+                      {analizData.plan === "free" && (
+                        <TouchableOpacity
+                          style={styles.analizLock}
+                          onPress={() => {
+                            setAnalizModalGorunur(false);
+                            setPaketModalGorunur(true);
+                          }}
+                        >
+                          <Text style={{ fontSize: 32, marginBottom: 8 }}>
+                            🔒
+                          </Text>
+                          <Text
+                            style={{
+                              fontWeight: "800",
+                              fontSize: 16,
+                              color: "#111",
+                              marginBottom: 4,
+                            }}
+                          >
+                            Detaylı Analiz
+                          </Text>
+                          <Text
+                            style={{
+                              color: "#888",
+                              fontSize: 13,
+                              textAlign: "center",
+                            }}
+                          >
+                            Saatlik dağılım, platform ve daha fazlası için Plus
+                            plana geç
+                          </Text>
+                          <View
+                            style={{
+                              backgroundColor: "#007AFF",
+                              borderRadius: 14,
+                              paddingHorizontal: 20,
+                              paddingVertical: 10,
+                              marginTop: 14,
+                            }}
+                          >
+                            <Text style={{ color: "#fff", fontWeight: "700" }}>
+                              Plus'a Geç →
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      )}
+
+                      {/* Saatlik dağılım (Plus+) */}
+                      {analizData.hourly && (
+                        <View style={styles.analizSection}>
+                          <Text style={styles.analizSectionTitle}>
+                            Saatlik Dağılım
+                          </Text>
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              alignItems: "flex-end",
+                              height: 90,
+                              gap: 2,
+                            }}
+                          >
+                            {analizData.hourly.map((val, i) => {
+                              const max = Math.max(...analizData.hourly, 1);
+                              const h = Math.max(
+                                (val / max) * 72,
+                                val > 0 ? 6 : 2,
+                              );
+                              const isActive = val > 0;
+                              return (
+                                <View
+                                  key={i}
+                                  style={{
+                                    flex: 1,
+                                    alignItems: "center",
+                                    justifyContent: "flex-end",
+                                  }}
+                                >
+                                  {isActive && (
+                                    <Text
+                                      style={{
+                                        fontSize: 8,
+                                        color: "#007AFF",
+                                        fontWeight: "800",
+                                        marginBottom: 2,
+                                      }}
+                                    >
+                                      {String(i).padStart(2, "0")}
+                                    </Text>
+                                  )}
+                                  <View
+                                    style={{
+                                      width: "100%",
+                                      height: h,
+                                      backgroundColor: isActive
+                                        ? "#007AFF"
+                                        : "#E5E5EA",
+                                      borderRadius: 3,
+                                    }}
+                                  />
+                                </View>
+                              );
+                            })}
+                          </View>
+                          <View
+                            style={{
+                              flexDirection: "row",
+                              justifyContent: "space-between",
+                              marginTop: 6,
+                            }}
+                          >
+                            {[
+                              "00",
+                              "03",
+                              "06",
+                              "09",
+                              "12",
+                              "15",
+                              "18",
+                              "21",
+                            ].map((t) => (
+                              <Text key={t} style={styles.analizAxisLabel}>
+                                {t}
+                              </Text>
+                            ))}
+                          </View>
+                        </View>
+                      )}
+
+                      {/* Platform (Pro+) */}
+                      {analizData.plan !== "free" &&
+                        analizData.plan !== "plus" &&
+                        analizData.platformCount && (
+                          <View style={styles.analizSection}>
+                            <Text style={styles.analizSectionTitle}>
+                              Platform
+                            </Text>
+                            {Object.entries(analizData.platformCount)
+                              .sort((a, b) => b[1] - a[1])
+                              .map(([k, v]) => (
+                                <View key={k} style={styles.analizRow}>
+                                  <Text style={styles.analizRowLabel}>
+                                    {k === "iOS"
+                                      ? "🍎 iOS"
+                                      : k === "Android"
+                                        ? "🤖 Android"
+                                        : "💻 Web"}
+                                  </Text>
+                                  <View
+                                    style={{ flex: 1, marginHorizontal: 10 }}
+                                  >
+                                    <View
+                                      style={{
+                                        height: 8,
+                                        backgroundColor: "#E5E5EA",
+                                        borderRadius: 4,
+                                      }}
+                                    >
+                                      <View
+                                        style={{
+                                          height: 8,
+                                          borderRadius: 4,
+                                          backgroundColor: "#007AFF",
+                                          width: `${Math.round((v / analizData.total) * 100)}%`,
+                                        }}
+                                      />
+                                    </View>
+                                  </View>
+                                  <Text style={styles.analizRowVal}>
+                                    {Math.round((v / analizData.total) * 100)}%
+                                  </Text>
+                                </View>
+                              ))}
+                          </View>
+                        )}
+
+                      {/* Ülke (Pro+) */}
+                      {analizData.plan !== "free" &&
+                        analizData.plan !== "plus" &&
+                        analizData.countryCount && (
+                          <View style={styles.analizSection}>
+                            <Text style={styles.analizSectionTitle}>Ülke</Text>
+                            {Object.entries(analizData.countryCount)
+                              .sort((a, b) => b[1] - a[1])
+                              .slice(0, 5)
+                              .map(([k, v]) => (
+                                <View key={k} style={styles.analizRow}>
+                                  <Text style={styles.analizRowLabel}>
+                                    {k || "Bilinmiyor"}
+                                  </Text>
+                                  <View
+                                    style={{ flex: 1, marginHorizontal: 10 }}
+                                  >
+                                    <View
+                                      style={{
+                                        height: 8,
+                                        backgroundColor: "#E5E5EA",
+                                        borderRadius: 4,
+                                      }}
+                                    >
+                                      <View
+                                        style={{
+                                          height: 8,
+                                          borderRadius: 4,
+                                          backgroundColor: "#34C759",
+                                          width: `${Math.round((v / analizData.total) * 100)}%`,
+                                        }}
+                                      />
+                                    </View>
+                                  </View>
+                                  <Text style={styles.analizRowVal}>{v}</Text>
+                                </View>
+                              ))}
+                          </View>
+                        )}
+
+                      {/* Agency: Cihaz, OS, Referrer, Dil */}
+                      {analizData.plan === "agency" && (
+                        <>
+                          <View style={styles.analizSection}>
+                            <Text style={styles.analizSectionTitle}>
+                              Cihaz Tipi
+                            </Text>
+                            {Object.entries(analizData.deviceCount)
+                              .sort((a, b) => b[1] - a[1])
+                              .map(([k, v]) => (
+                                <View key={k} style={styles.analizRow}>
+                                  <Text style={styles.analizRowLabel}>
+                                    {k === "Mobile"
+                                      ? "📱 Mobil"
+                                      : k === "Tablet"
+                                        ? "📟 Tablet"
+                                        : "🖥 Masaüstü"}
+                                  </Text>
+                                  <View
+                                    style={{ flex: 1, marginHorizontal: 10 }}
+                                  >
+                                    <View
+                                      style={{
+                                        height: 8,
+                                        backgroundColor: "#E5E5EA",
+                                        borderRadius: 4,
+                                      }}
+                                    >
+                                      <View
+                                        style={{
+                                          height: 8,
+                                          borderRadius: 4,
+                                          backgroundColor: "#FF9500",
+                                          width: `${Math.round((v / analizData.total) * 100)}%`,
+                                        }}
+                                      />
+                                    </View>
+                                  </View>
+                                  <Text style={styles.analizRowVal}>{v}</Text>
+                                </View>
+                              ))}
+                          </View>
+
+                          <View style={styles.analizSection}>
+                            <Text style={styles.analizSectionTitle}>
+                              İşletim Sistemi
+                            </Text>
+                            {Object.entries(analizData.osCount)
+                              .sort((a, b) => b[1] - a[1])
+                              .slice(0, 5)
+                              .map(([k, v]) => (
+                                <View key={k} style={styles.analizRow}>
+                                  <Text style={styles.analizRowLabel}>{k}</Text>
+                                  <View
+                                    style={{ flex: 1, marginHorizontal: 10 }}
+                                  >
+                                    <View
+                                      style={{
+                                        height: 8,
+                                        backgroundColor: "#E5E5EA",
+                                        borderRadius: 4,
+                                      }}
+                                    >
+                                      <View
+                                        style={{
+                                          height: 8,
+                                          borderRadius: 4,
+                                          backgroundColor: "#5856D6",
+                                          width: `${Math.round((v / analizData.total) * 100)}%`,
+                                        }}
+                                      />
+                                    </View>
+                                  </View>
+                                  <Text style={styles.analizRowVal}>{v}</Text>
+                                </View>
+                              ))}
+                          </View>
+
+                          {Object.keys(analizData.referrerCount).length > 0 && (
+                            <View style={styles.analizSection}>
+                              <Text style={styles.analizSectionTitle}>
+                                Kaynak (Referrer)
+                              </Text>
+                              {Object.entries(analizData.referrerCount)
+                                .sort((a, b) => b[1] - a[1])
+                                .slice(0, 5)
+                                .map(([k, v]) => (
+                                  <View key={k} style={styles.analizRow}>
+                                    <Text
+                                      style={styles.analizRowLabel}
+                                      numberOfLines={1}
+                                    >
+                                      {k}
+                                    </Text>
+                                    <Text style={styles.analizRowVal}>{v}</Text>
+                                  </View>
+                                ))}
+                            </View>
+                          )}
+
+                          <View style={styles.analizSection}>
+                            <Text style={styles.analizSectionTitle}>
+                              Haftalık Gün Dağılımı
+                            </Text>
+                            {[
+                              "Paz",
+                              "Pzt",
+                              "Sal",
+                              "Çar",
+                              "Per",
+                              "Cum",
+                              "Cmt",
+                            ].map((gun, i) => {
+                              const max = Math.max(...analizData.dowCount, 1);
+                              return (
+                                <View key={i} style={styles.analizRow}>
+                                  <Text style={styles.analizRowLabel}>
+                                    {gun}
+                                  </Text>
+                                  <View
+                                    style={{ flex: 1, marginHorizontal: 10 }}
+                                  >
+                                    <View
+                                      style={{
+                                        height: 8,
+                                        backgroundColor: "#E5E5EA",
+                                        borderRadius: 4,
+                                      }}
+                                    >
+                                      <View
+                                        style={{
+                                          height: 8,
+                                          borderRadius: 4,
+                                          backgroundColor: "#FF2D55",
+                                          width: `${Math.round((analizData.dowCount[i] / max) * 100)}%`,
+                                        }}
+                                      />
+                                    </View>
+                                  </View>
+                                  <Text style={styles.analizRowVal}>
+                                    {analizData.dowCount[i]}
+                                  </Text>
+                                </View>
+                              );
+                            })}
+                          </View>
+                        </>
+                      )}
+
+                      {/* Plus lock — Pro özellikler */}
+                      {analizData.plan === "plus" && (
+                        <TouchableOpacity
+                          style={styles.analizLock}
+                          onPress={() => {
+                            setAnalizModalGorunur(false);
+                            setPaketModalGorunur(true);
+                          }}
+                        >
+                          <Text style={{ fontSize: 28, marginBottom: 8 }}>
+                            ⚡
+                          </Text>
+                          <Text
+                            style={{
+                              fontWeight: "800",
+                              fontSize: 15,
+                              color: "#111",
+                              marginBottom: 4,
+                            }}
+                          >
+                            Pro Analitik
+                          </Text>
+                          <Text
+                            style={{
+                              color: "#888",
+                              fontSize: 13,
+                              textAlign: "center",
+                            }}
+                          >
+                            Platform, ülke ve benzersiz ziyaretçi için Pro plana
+                            geç
+                          </Text>
+                          <View
+                            style={{
+                              backgroundColor: "#007AFF",
+                              borderRadius: 14,
+                              paddingHorizontal: 20,
+                              paddingVertical: 10,
+                              marginTop: 14,
+                            }}
+                          >
+                            <Text style={{ color: "#fff", fontWeight: "700" }}>
+                              Pro'ya Geç →
+                            </Text>
+                          </View>
+                        </TouchableOpacity>
+                      )}
+                    </>
+                  ) : null}
+                </ScrollView>
+              </View>
+            </View>
+          </Modal>
 
           {/* PROFİL MODAL */}
           <Modal
@@ -3092,6 +3701,44 @@ const styles = StyleSheet.create({
   },
   gradSlotBtnActive: { backgroundColor: "#000", borderColor: "#000" },
   gradSlotLabel: { fontSize: 13, fontWeight: "700", color: "#333" },
+  analizKart: {
+    flex: 1,
+    backgroundColor: "#F7F8FA",
+    borderRadius: 18,
+    padding: 16,
+    alignItems: "center",
+  },
+  analizSayi: { fontSize: 32, fontWeight: "900", color: "#111" },
+  analizLabel: { fontSize: 12, color: "#888", marginTop: 4, fontWeight: "600" },
+  analizSection: {
+    backgroundColor: "#F7F8FA",
+    borderRadius: 18,
+    padding: 16,
+    marginBottom: 12,
+  },
+  analizSectionTitle: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#111",
+    marginBottom: 12,
+  },
+  analizRow: { flexDirection: "row", alignItems: "center", marginBottom: 10 },
+  analizRowLabel: { fontSize: 13, color: "#333", width: 90, fontWeight: "600" },
+  analizRowVal: {
+    fontSize: 13,
+    fontWeight: "800",
+    color: "#111",
+    width: 36,
+    textAlign: "right",
+  },
+  analizAxisLabel: { fontSize: 10, color: "#AAA", fontWeight: "600" },
+  analizLock: {
+    backgroundColor: "#F7F8FA",
+    borderRadius: 20,
+    padding: 24,
+    alignItems: "center",
+    marginBottom: 16,
+  },
   authCard: {
     backgroundColor: "#FFF",
     width: "85%",
